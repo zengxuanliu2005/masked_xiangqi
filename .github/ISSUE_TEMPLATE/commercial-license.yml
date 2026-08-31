@@ -1,0 +1,39 @@
+name: 商业授权咨询
+description: 咨询 PolyForm 非商业条款之外的书面商业授权
+title: "[Commercial license]: "
+labels: [commercial-license]
+body:
+  - type: markdown
+    attributes:
+      value: 此 Issue 默认公开。请勿填写商业秘密、客户数据、未公开财务信息或其他机密内容；先提供非机密概述，维护者再协调私密沟通。
+  - type: input
+    id: organization
+    attributes:
+      label: 组织名称
+    validations:
+      required: true
+  - type: textarea
+    id: use
+    attributes:
+      label: 非机密用途概述
+      description: 说明预期产品、部署方式和使用规模，不要披露机密。
+    validations:
+      required: true
+  - type: dropdown
+    id: distribution
+    attributes:
+      label: 预期使用方式
+      options:
+        - 内部商业使用
+        - 向客户分发
+        - 托管服务
+        - 其他（在概述中说明）
+    validations:
+      required: true
+  - type: checkboxes
+    id: confidentiality
+    attributes:
+      label: 信息确认
+      options:
+        - label: 我确认本 Issue 未包含机密商业信息。
+          required: true

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+output/
+.local/
+.playwright-cli/
+playwright-report/
+test-results/
+package-lock.json
+docs/images/

@@ -1,0 +1,33 @@
+name: Bug report
+description: 报告可复现的问题或回归
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿粘贴 `.local` 会话文件、token、敏感日志或未公开漏洞。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 说明期望行为和实际行为。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: macOS 15 / Node 22.12 / Chrome 140 / Ollama 版本
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏日志
+      description: 仅提供已删除 token、路径和个人信息的最小片段。
