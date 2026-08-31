@@ -82,8 +82,10 @@ describe("Agent 会话文件与终端", () => {
     await writeAgentSessionFile(filePath, contents);
 
     expect(await readAgentSessionFile(filePath, directory)).toEqual(contents);
-    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
-    expect((await stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") {
+      expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+      expect((await stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
+    }
   });
 
   it("按 macOS、Windows、Linux 的固定优先级检测终端", () => {
@@ -188,7 +190,7 @@ describe("Agent 会话文件与终端", () => {
     expect(args[0]).toBe("-e");
     expect(args[1]).toContain("/bin/zsh -c");
     expect(args[1]).toContain("MASKED_XIANGQI_AGENT_SESSION_FILE");
-    expect(args[1]).toContain("server/agent/cli.ts");
+    expect(args[1].replaceAll("\\", "/")).toContain("server/agent/cli.ts");
   });
 
   it("单对局只启动一个会话，公开状态不泄露 token", async () => {
