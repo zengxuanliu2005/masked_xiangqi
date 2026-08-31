@@ -190,7 +190,9 @@ describe("Agent 会话文件与终端", () => {
     expect(args[0]).toBe("-e");
     expect(args[1]).toContain("/bin/zsh -c");
     expect(args[1]).toContain("MASKED_XIANGQI_AGENT_SESSION_FILE");
-    expect(args[1].replaceAll("\\", "/")).toContain("server/agent/cli.ts");
+    expect(args[1].replaceAll("\\", "/").replace(/\/+/g, "/")).toContain(
+      "server/agent/cli.ts",
+    );
   });
 
   it("单对局只启动一个会话，公开状态不泄露 token", async () => {
