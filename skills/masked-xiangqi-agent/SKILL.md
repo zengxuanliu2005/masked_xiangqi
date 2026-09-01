@@ -34,7 +34,11 @@ PowerShell uses `$env:MASKED_XIANGQI_AGENT_SESSION_FILE='C:\path\session.json'; 
 
 Do not construct a second Ollama prompt, chess-rule engine, or fallback move selector. The formal Runner owns streaming thinking, one correction retry, revision cancellation, status reporting, and JSONL logging.
 
-Use the session endpoints to read status, restart a paused/exited controller, or stop it. Built-in human-versus-model games always assign the Runner to `players.player2`.
+Use the session endpoints to read status, restart a paused/exited controller, or stop it. Built-in human-versus-model games always assign the Runner to `players.player2`. Every agent-session endpoint is loopback-only, so run this skill on the machine hosting the game.
+
+## LAN games are out of scope
+
+A game with `matchType: "lan-human"` is a two-human LAN match. Its writes require a per-seat bearer token that is issued once at join time and never re-disclosed, so do not attempt to move, resign, or negotiate takebacks in one. `POST /games` cannot create such a game; reading it is fine and follows the same public-projection rules as any other.
 
 ## Control a side with another Agent
 

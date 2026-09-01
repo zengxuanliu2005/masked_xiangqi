@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { isLoopbackHostname } from "../net/host-policy";
 
 export const AGENT_SESSION_FILE_ENV = "MASKED_XIANGQI_AGENT_SESSION_FILE";
 
@@ -94,9 +95,7 @@ export async function readAgentSessionFile(
   const apiUrl = new URL(parsed.apiBaseUrl);
   if (
     apiUrl.protocol !== "http:" ||
-    !["localhost", "127.0.0.1", "::1", "[::1]"].includes(
-      apiUrl.hostname.toLowerCase(),
-    ) ||
+    !isLoopbackHostname(apiUrl.hostname) ||
     apiUrl.username ||
     apiUrl.password
   ) {

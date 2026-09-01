@@ -3,7 +3,7 @@ export const BOARD_HEIGHT = 10;
 
 export type Color = "red" | "black";
 export type GameMode = "standard" | "capture-general";
-export type MatchType = "human-human" | "human-ai";
+export type MatchType = "human-human" | "human-ai" | "lan-human";
 export type PieceType =
   "general" | "advisor" | "elephant" | "horse" | "rook" | "cannon" | "pawn";
 
@@ -57,6 +57,39 @@ export interface PublicLastMove {
   revealedIdentity?: PieceIdentity;
 }
 
+export interface LanSeatState {
+  claimed: boolean;
+  /**
+   * Derived from the seat's poll heartbeat. Advisory only — a flaky network
+   * flips this with no side effects; only the host explicitly revokes a seat.
+   * The raw timestamp is deliberately not exposed: it would be a side channel
+   * on the opponent's device activity.
+   */
+  online: boolean;
+}
+
+export interface LanUndoRequestState {
+  /** 128-bit random identity; prevents a delayed answer matching a newer request. */
+  id: string;
+  requestedBy: Color;
+  atRevision: number;
+  expiresAt: string;
+}
+
+/** Result of validating the bearer token attached to this particular read. */
+export type LanViewerSeatState =
+  { status: "valid"; color: Color } | { status: "revoked" | "invalid" };
+
+export interface LanRoomState {
+  /** Projected only for the host seat, so a bare read never leaks a live invite. */
+  roomCode?: string;
+  host: Color;
+  seats: Record<Color, LanSeatState>;
+  undoRequest: LanUndoRequestState | null;
+  /** Omitted for anonymous reads; never contains the credential itself. */
+  viewer?: LanViewerSeatState;
+}
+
 export interface PublicGameState {
   id: string;
   /** Hidden while active and disclosed only after the game has finished. */
@@ -83,6 +116,11 @@ export interface PublicGameState {
   captured: Record<Color, PublicCapturedPiece[]>;
   lastMove: PublicLastMove | null;
   createdAt: string;
+  /**
+   * Present only for `lan-human` games. Optional so every existing
+   * PublicGameState literal keeps compiling.
+   */
+  lan?: LanRoomState | null;
 }
 
 export interface LegalMove {
@@ -106,7 +144,8 @@ export interface CreateGameRequest {
   allowDraw?: boolean;
   /** Defaults to true. Controls whether a player may take back moves. */
   allowUndo?: boolean;
-  matchType: MatchType;
+  /** LAN games must be created through POST /rooms so they cannot lack a room. */
+  matchType: Exclude<MatchType, "lan-human">;
   /** Omit to let the server assign Player 1 / the human side at random. */
   player1Side?: Color;
   aiModel?: string;
@@ -238,4 +277,5 @@ export const MODE_LABELS: Record<GameMode, string> = {
 export const MATCH_LABELS: Record<MatchType, string> = {
   "human-human": "双人对战",
   "human-ai": "人机对战",
+  "lan-human": "局域网对战",
 };
