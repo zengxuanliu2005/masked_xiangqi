@@ -172,6 +172,90 @@ describe("发布安全门禁", () => {
     );
   });
 
+  it("远程 socket 不能用 Host 或代理头伪装本机专属调用", async () => {
+    const store = new GameStore();
+    const protectedGame = store.create({
+      mode: "capture-general",
+      allowDraw: true,
+      allowUndo: true,
+      matchType: "human-human",
+      player1Side: "red",
+      aiModel: null,
+      seed: "remote-write-security-gate",
+    });
+    const app = createApp({
+      store,
+      aiProvider: provider(),
+      networkMode: () => "lan",
+      remoteAddress: () => "192.168.1.20",
+      networkController: {
+        status: () => ({
+          mode: "lan",
+          targetMode: "lan",
+          port: 3001,
+          addresses: ["192.168.1.5"],
+          error: null,
+          pending: false,
+          listening: true,
+        }),
+        setMode: vi.fn(async () => undefined),
+      },
+    });
+    const api = await serve(app);
+    const spoofed = {
+      host: "127.0.0.1:3001",
+      "x-forwarded-for": "127.0.0.1",
+      "x-real-ip": "127.0.0.1",
+      forwarded: "for=127.0.0.1;host=127.0.0.1",
+    };
+
+    expect(
+      (await api.get("/api/v1/health").set(spoofed).expect(403)).body.error
+        .code,
+    ).toBe("HOST_FORBIDDEN");
+
+    for (const call of [
+      api.post("/api/v1/games").send({ matchType: "human-human" }),
+      api.post("/api/v1/rooms").send({}),
+      api.get("/api/v1/ai/models"),
+      api.post("/api/v1/network").send({ mode: "loopback" }),
+      api.post("/api/v1/games/unknown/agent-session").send({}),
+    ]) {
+      const response = await call.set(spoofed).expect(403);
+      expect(response.body.error.code).toBe("LOOPBACK_ONLY");
+    }
+
+    const wrongInterface = await api
+      .get("/api/v1/health")
+      .set("host", "10.0.0.7:3001")
+      .expect(403);
+    expect(wrongInterface.body.error.code).toBe("HOST_FORBIDDEN");
+
+    const lanHost = "192.168.1.5:3001";
+    const legal = await api
+      .get(`/api/v1/games/${protectedGame.id}/legal-moves`)
+      .set("host", lanHost)
+      .expect(200);
+    const first = legal.body.moves[0];
+    for (const call of [
+      api.post(`/api/v1/games/${protectedGame.id}/moves`).send({
+        from: first.from,
+        to: first.to,
+        expectedRevision: 0,
+      }),
+      api
+        .post(`/api/v1/games/${protectedGame.id}/resign`)
+        .send({ expectedRevision: 0 }),
+      api
+        .post(`/api/v1/games/${protectedGame.id}/undo`)
+        .send({ expectedRevision: 0 }),
+    ]) {
+      const response = await call.set("host", lanHost).expect(403);
+      expect(response.body.error.code).toBe("LOOPBACK_ONLY");
+    }
+    expect(store.get(protectedGame.id)?.revision).toBe(0);
+  });
+
   it("同 revision 的 100 个并发写请求恰好一个成功", async () => {
     const app = createApp({ aiProvider: provider(), random: () => 0 });
     const api = await serve(app);
@@ -342,6 +426,21 @@ describe("发布安全门禁", () => {
     await expect(readAgentSessionFile(remote, root)).rejects.toThrow(
       "本机 HTTP API",
     );
+
+    // Runner 永远只连回环，与 HTTP 监听是否开放到局域网无关。这条钉死
+    // loopback 与 lan 两个判定必须保持分离，不能被合并成同一个白名单。
+    const lanApis = [
+      "http://192.168.1.5:3001",
+      "http://10.0.0.7:3001",
+      "http://[fe80::1]:3001",
+    ];
+    for (const [index, lanApi] of lanApis.entries()) {
+      const lanSession = path.join(sessionRoot, `lan-${index}.json`);
+      await writeAgentSessionFile(lanSession, { ...valid, apiBaseUrl: lanApi });
+      await expect(readAgentSessionFile(lanSession, root)).rejects.toThrow(
+        "本机 HTTP API",
+      );
+    }
 
     const target = path.join(sessionRoot, "target.json");
     const link = path.join(sessionRoot, "link.json");

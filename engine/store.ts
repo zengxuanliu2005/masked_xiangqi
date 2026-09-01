@@ -73,6 +73,24 @@ export class GameStore {
     return game;
   }
 
+  /**
+   * Existence check that does NOT touch `lastAccessedAt`. Callers sweeping many
+   * ids (the LAN room registry does this on every poll) must use this, or the
+   * sweep itself keeps every game alive and the idle TTL never fires.
+   */
+  has(id: string): boolean {
+    this.pruneExpired();
+    return this.games.has(id);
+  }
+
+  /** Prunes once, then answers a whole registry sweep in linear time. */
+  existing(ids: readonly string[]): ReadonlySet<string> {
+    this.pruneExpired();
+    const found = new Set<string>();
+    for (const id of ids) if (this.games.has(id)) found.add(id);
+    return found;
+  }
+
   get(id: string): GameState | undefined {
     const game = this.games.get(id);
     if (game) game.lastAccessedAt = this.now().toISOString();

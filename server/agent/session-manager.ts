@@ -13,6 +13,7 @@ import type {
 } from "../../shared/contracts";
 import { SystemTerminalLauncher, type TerminalLauncher } from "./terminal";
 import { writeAgentSessionFile } from "./session-file";
+import { isLoopbackHostname } from "../net/host-policy";
 
 const activeStatuses = new Set<AgentSessionStatus>([
   "starting",
@@ -87,7 +88,7 @@ const assertLocalApiBaseUrl = (raw: string): string => {
   const hostname = url.hostname.toLowerCase();
   if (
     url.protocol !== "http:" ||
-    !["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname) ||
+    !isLoopbackHostname(hostname) ||
     url.username ||
     url.password
   ) {

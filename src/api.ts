@@ -1,5 +1,7 @@
 import type {
   AgentSessionState,
+  Color,
+  LanRoomState,
   AiModelsResponse,
   AiMoveResponse,
   ApiErrorBody,
@@ -21,11 +23,17 @@ export class ApiClientError extends Error {
   }
 }
 
-const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+const request = async <T>(
+  path: string,
+  init?: RequestInit,
+  seatToken?: string,
+): Promise<T> => {
   const response = await fetch(path, {
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
+      // Seat credentials ride the Authorization header, never the URL.
+      ...(seatToken ? { authorization: `Bearer ${seatToken}` } : {}),
       ...init?.headers,
     },
   });
@@ -42,10 +50,46 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   return body as T;
 };
 
+export interface CreateRoomRequest {
+  mode?: "standard" | "capture-general";
+  allowDraw?: boolean;
+  allowUndo?: boolean;
+  hostSide?: Color;
+  seed?: string;
+}
+
+export interface LanSeatResponse {
+  game: PublicGameState & { lan?: LanRoomState | null };
+  /** Returned exactly once, at claim time. Never present in a later read. */
+  roomCode?: string;
+  seat: { color: Color; token: string };
+}
+
+export interface LanInviteResponse {
+  game: PublicGameState;
+  roomCode: string;
+}
+
+export interface NetworkStatusResponse {
+  mode: "loopback" | "lan";
+  targetMode: "loopback" | "lan";
+  port: number;
+  addresses: string[];
+  error: string | null;
+  pending: boolean;
+  listening: boolean;
+  /** False when read from another device: the toggle is loopback-only. */
+  local: boolean;
+}
+
 export interface GameApi {
   createGame(request: CreateGameRequest): Promise<PublicGameState>;
   getAiModels(): Promise<AiModelsResponse>;
-  getGame(id: string, signal?: AbortSignal): Promise<PublicGameState>;
+  getGame(
+    id: string,
+    signal?: AbortSignal,
+    seatToken?: string,
+  ): Promise<PublicGameState>;
   getLegalMoves(
     id: string,
     pieceId?: string,
@@ -56,9 +100,36 @@ export interface GameApi {
     from: Position,
     to: Position,
     expectedRevision: number,
+    seatToken?: string,
   ): Promise<PublicGameState>;
   undo(id: string, expectedRevision: number): Promise<PublicGameState>;
-  resign(id: string, expectedRevision: number): Promise<PublicGameState>;
+  resign(
+    id: string,
+    expectedRevision: number,
+    seatToken?: string,
+  ): Promise<PublicGameState>;
+  createRoom(request: CreateRoomRequest): Promise<LanSeatResponse>;
+  joinRoom(roomCode: string): Promise<LanSeatResponse>;
+  reinvite(
+    id: string,
+    expectedRevision: number,
+    expectedRoomCode: string,
+    seatToken: string,
+  ): Promise<LanInviteResponse>;
+  requestUndo(
+    id: string,
+    expectedRevision: number,
+    seatToken: string,
+  ): Promise<PublicGameState>;
+  resolveUndo(
+    id: string,
+    expectedRevision: number,
+    requestId: string,
+    accept: boolean,
+    seatToken: string,
+  ): Promise<PublicGameState>;
+  getNetwork(signal?: AbortSignal): Promise<NetworkStatusResponse>;
+  setNetworkMode(mode: "loopback" | "lan"): Promise<NetworkStatusResponse>;
   aiMove(id: string, expectedRevision: number): Promise<AiMoveResponse>;
   createAgentSession(id: string): Promise<AgentSessionState>;
   getAgentSession(id: string, signal?: AbortSignal): Promise<AgentSessionState>;
@@ -76,8 +147,12 @@ export const gameApi: GameApi = {
   getAiModels() {
     return request<AiModelsResponse>("/api/v1/ai/models");
   },
-  getGame(id, signal) {
-    return request<PublicGameState>(`/api/v1/games/${id}`, { signal });
+  getGame(id, signal, seatToken) {
+    return request<PublicGameState>(
+      `/api/v1/games/${id}`,
+      { signal },
+      seatToken,
+    );
   },
   getLegalMoves(id, pieceId, signal) {
     const suffix = pieceId ? `?pieceId=${encodeURIComponent(pieceId)}` : "";
@@ -86,11 +161,12 @@ export const gameApi: GameApi = {
       { signal },
     );
   },
-  move(id, from, to, expectedRevision) {
-    return request<PublicGameState>(`/api/v1/games/${id}/moves`, {
-      method: "POST",
-      body: JSON.stringify({ from, to, expectedRevision }),
-    });
+  move(id, from, to, expectedRevision, seatToken) {
+    return request<PublicGameState>(
+      `/api/v1/games/${id}/moves`,
+      { method: "POST", body: JSON.stringify({ from, to, expectedRevision }) },
+      seatToken,
+    );
   },
   undo(id, expectedRevision) {
     return request<PublicGameState>(`/api/v1/games/${id}/undo`, {
@@ -98,10 +174,59 @@ export const gameApi: GameApi = {
       body: JSON.stringify({ expectedRevision }),
     });
   },
-  resign(id, expectedRevision) {
-    return request<PublicGameState>(`/api/v1/games/${id}/resign`, {
+  resign(id, expectedRevision, seatToken) {
+    return request<PublicGameState>(
+      `/api/v1/games/${id}/resign`,
+      { method: "POST", body: JSON.stringify({ expectedRevision }) },
+      seatToken,
+    );
+  },
+  createRoom(payload) {
+    return request<LanSeatResponse>("/api/v1/rooms", {
       method: "POST",
-      body: JSON.stringify({ expectedRevision }),
+      body: JSON.stringify(payload),
+    });
+  },
+  joinRoom(roomCode) {
+    return request<LanSeatResponse>(
+      `/api/v1/rooms/${encodeURIComponent(roomCode)}/join`,
+      { method: "POST", body: JSON.stringify({}) },
+    );
+  },
+  reinvite(id, expectedRevision, expectedRoomCode, seatToken) {
+    return request<LanInviteResponse>(
+      `/api/v1/games/${id}/invite`,
+      {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision, expectedRoomCode }),
+      },
+      seatToken,
+    );
+  },
+  requestUndo(id, expectedRevision, seatToken) {
+    return request<PublicGameState>(
+      `/api/v1/games/${id}/undo-request`,
+      { method: "POST", body: JSON.stringify({ expectedRevision }) },
+      seatToken,
+    );
+  },
+  resolveUndo(id, expectedRevision, requestId, accept, seatToken) {
+    return request<PublicGameState>(
+      `/api/v1/games/${id}/undo-request/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision, requestId, accept }),
+      },
+      seatToken,
+    );
+  },
+  getNetwork(signal) {
+    return request<NetworkStatusResponse>("/api/v1/network", { signal });
+  },
+  setNetworkMode(mode) {
+    return request<NetworkStatusResponse>("/api/v1/network", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
     });
   },
   aiMove(id, expectedRevision) {

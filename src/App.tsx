@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   COLOR_LABELS,
+  MATCH_LABELS,
   MODE_LABELS,
   PIECE_LABELS,
   type AgentSessionState,
@@ -24,7 +25,31 @@ import {
   type PublicCapturedPiece,
   type PublicGameState,
 } from "../shared/contracts";
-import { ApiClientError, gameApi, type GameApi } from "./api";
+import {
+  ApiClientError,
+  gameApi,
+  type GameApi,
+  type NetworkStatusResponse,
+} from "./api";
+import {
+  clearSeatRecord,
+  createSeatRecord,
+  isMySeatTurn,
+  isOpponentOnline,
+  isSeatRevoked,
+  isWaitingForOpponent,
+  joinUrlFor,
+  latestSeatRecord,
+  lanStateChanged,
+  normalizeRoomCodeInput,
+  readSeatRecord,
+  ROOM_CODE_LENGTH,
+  sameSeatCredential,
+  seatColorFor,
+  takeRoomCodeFromLocation,
+  writeSeatRecord,
+  type LanSeatRecord,
+} from "./lan";
 import {
   deriveBoardMotion,
   prefersReducedBoardMotion,
@@ -33,6 +58,7 @@ import {
 
 type AppView = "home" | "mode" | "tutorial" | "game";
 type SeedMode = "random" | "custom";
+type ForgetSeatResult = "forgotten" | "replaced" | "storage-failed";
 
 interface GameLaunchOptions {
   matchType: MatchType;
@@ -71,6 +97,26 @@ const controllerStatusText: Record<AgentSessionState["status"], string> = {
 const squareName = ({ x, y }: Position) => `${FILE_NAMES[x]}路 ${y + 1}线`;
 const positionKey = ({ x, y }: Position) => `${x},${y}`;
 const LAST_GAME_STORAGE_KEY = "masked-xiangqi:last-game-id";
+const NETWORK_POLL_INTERVAL_MS = 150;
+const NETWORK_SWITCH_TIMEOUT_MS = 5_000;
+const NETWORK_RECONCILE_INTERVAL_MS = 1_000;
+const NETWORK_STATUS_REFRESH_INTERVAL_MS = 5_000;
+
+const initialRecoveryGameId = (): string | null => {
+  // A one-time LAN seat is more important than a later bare game id left by an
+  // older client: without the seat id there would be no normal path to release
+  // or resume that room.
+  const storedSeat = readSeatRecord();
+  if (storedSeat) return storedSeat.gameId;
+  try {
+    return window.localStorage.getItem(LAST_GAME_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+};
+
+const wait = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 const focusableSelector = [
   "button:not([disabled])",
@@ -210,7 +256,17 @@ const pieceName = (piece: PublicBoardPiece): string => {
   return `${COLOR_LABELS[identity.color]}${PIECE_LABELS[identity.color][identity.type]}`;
 };
 
-const playerFor = (game: PublicGameState, color: Color): string => {
+const playerFor = (
+  game: PublicGameState,
+  color: Color,
+  seatColor: Color | null = null,
+): string => {
+  if (game.matchType === "lan-human") {
+    if (seatColor) return color === seatColor ? "你" : "对手";
+    // No seat yet (a spectator read, or before the join completes): fall back
+    // to the room's own vocabulary rather than inventing a perspective.
+    return game.lan && color === game.lan.host ? "房主" : "访客";
+  }
   if (game.players.player1 === color) {
     return game.matchType === "human-ai" ? "你" : "Player 1";
   }
@@ -224,11 +280,13 @@ function SiteHeader({
   onHome,
   onBack,
   routeLabel,
+  networkMode,
 }: {
   view: AppView;
   onHome: () => void;
   onBack?: () => void;
   routeLabel?: string;
+  networkMode?: NetworkStatusResponse["mode"];
 }) {
   return (
     <header className="site-header">
@@ -242,9 +300,9 @@ function SiteHeader({
         </span>
       </button>
       {view === "home" ? (
-        <div className="local-note">
+        <div className={`local-note ${networkMode === "lan" ? "is-lan" : ""}`}>
           <span />
-          仅在本机运行
+          {networkMode === "lan" ? "已开放局域网" : "仅在本机运行"}
         </div>
       ) : (
         <div className="header-route">
@@ -271,15 +329,21 @@ function HomePage({
   onTutorial,
   onResume,
   canResume,
+  networkMode,
 }: {
   onStart: () => void;
   onTutorial: () => void;
   onResume: () => void;
   canResume: boolean;
+  networkMode?: NetworkStatusResponse["mode"];
 }) {
   return (
     <div className="landing-page">
-      <SiteHeader view="home" onHome={() => undefined} />
+      <SiteHeader
+        view="home"
+        onHome={() => undefined}
+        networkMode={networkMode}
+      />
       <main className="home-main">
         <section className="hero-section">
           <div className="hero-copy">
@@ -330,7 +394,10 @@ function HomePage({
         </section>
       </main>
       <footer className="site-footer">
-        <span>覆子 · 本地象棋盲棋</span>
+        <span>
+          覆子 · 本地象棋盲棋
+          {networkMode === "lan" ? " · 局域网对战已开启" : ""}
+        </span>
       </footer>
     </div>
   );
@@ -399,8 +466,7 @@ function GameSetupDialog({
             <p className="eyebrow">第 2 步 / 共 2 步</p>
             <h2 id="setup-dialog-title">设置这一局</h2>
             <p id="setup-dialog-description">
-              {matchType === "human-ai" ? "人机对战" : "人人对战"} ·
-              红黑随机分配 · 红方先行
+              {MATCH_LABELS[matchType]} · 红黑随机分配 · 红方先行
             </p>
           </div>
           <button
@@ -474,7 +540,9 @@ function GameSetupDialog({
                 <p>
                   {matchType === "human-ai"
                     ? "撤回玩家与模型的上一轮行棋。"
-                    : "每次撤回最近完成的一步棋。"}
+                    : matchType === "lan-human"
+                      ? "每次撤回最近完成的一步棋，需对方同意。"
+                      : "每次撤回最近完成的一步棋。"}
                 </p>
               </div>
               <button
@@ -557,6 +625,100 @@ function GameSetupDialog({
   );
 }
 
+function JoinRoomDialog({
+  busy,
+  initialCode,
+  onCancel,
+  onConfirm,
+  returnFocusRef,
+}: {
+  busy: boolean;
+  initialCode: string;
+  onCancel: () => void;
+  onConfirm: (roomCode: string) => void;
+  returnFocusRef?: RefObject<HTMLButtonElement | null>;
+}) {
+  const dialogRef = useRef<HTMLFormElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [code, setCode] = useState(initialCode);
+  useModalFocus(dialogRef, inputRef, onCancel, busy, returnFocusRef);
+  // Short submits are guaranteed misses and would burn a join-throttle slot.
+  const ready = code.length === ROOM_CODE_LENGTH;
+
+  return (
+    <div
+      className="setup-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <form
+        ref={dialogRef}
+        className="setup-dialog join-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="加入局域网对局"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (ready && !busy) onConfirm(code);
+        }}
+      >
+        <header className="setup-dialog-header">
+          <div>
+            <p className="eyebrow">局域网对战</p>
+            <h2>加入对局</h2>
+          </div>
+          <button
+            type="button"
+            className="setup-close"
+            aria-label="关闭加入对局"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            ×
+          </button>
+        </header>
+
+        <div className="setup-dialog-body">
+          <label className="seed-input-label" htmlFor="join-room-code">
+            房间码
+            <input
+              id="join-room-code"
+              ref={inputRef}
+              value={code}
+              inputMode="text"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="例如 M65BCB"
+              // Cap after normalization: a raw maxlength would truncate a
+              // formatted paste such as ABC-234 before removing the dash.
+              onChange={(event) =>
+                setCode(normalizeRoomCodeInput(event.target.value))
+              }
+            />
+          </label>
+          <p className="join-hint">
+            房间码由房主的设备显示。你需要和对方处在同一个 Wi-Fi 下。
+          </p>
+        </div>
+
+        <div className="setup-dialog-actions">
+          <button type="button" disabled={busy} onClick={onCancel}>
+            取消
+          </button>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={busy || !ready}
+          >
+            {busy ? "正在加入…" : "加入对局"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function ModePage({
   aiStatus,
   selectedModel,
@@ -570,6 +732,10 @@ function ModePage({
   onCustomSeed,
   onStart,
   onHome,
+  onJoin,
+  network,
+  onToggleLan,
+  joinPrefill,
 }: {
   aiStatus: AiModelsResponse | null;
   selectedModel: string;
@@ -583,8 +749,13 @@ function ModePage({
   onCustomSeed: (seed: string) => void;
   onStart: (options: GameLaunchOptions) => void;
   onHome: () => void;
+  onJoin: (roomCode: string) => void;
+  network: NetworkStatusResponse | null;
+  onToggleLan: (enabled: boolean) => void;
+  joinPrefill: string | null;
 }) {
   const [pendingMatch, setPendingMatch] = useState<MatchType | null>(null);
+  const [joining, setJoining] = useState(Boolean(joinPrefill));
   const setupTriggerRef = useRef<HTMLButtonElement>(null);
   const [gameMode, setGameMode] = useState<GameMode>("standard");
   const [allowDraw, setAllowDraw] = useState(true);
@@ -599,6 +770,7 @@ function ModePage({
   );
   const selectedSeed = seedMode === "custom" ? customSeed.trim() : undefined;
   const closeSetup = useCallback(() => setPendingMatch(null), []);
+  const remoteViewer = network?.local === false;
 
   const confirmSetup = () => {
     if (!pendingMatch) return;
@@ -643,7 +815,7 @@ function ModePage({
             <button
               type="button"
               className="primary-button mode-start"
-              disabled={busy}
+              disabled={busy || remoteViewer}
               onClick={(event) => {
                 setupTriggerRef.current = event.currentTarget;
                 setPendingMatch("human-human");
@@ -715,7 +887,7 @@ function ModePage({
             <button
               type="button"
               className="primary-button mode-start"
-              disabled={busy || loadingModels || !canStartAi}
+              disabled={busy || remoteViewer || loadingModels || !canStartAi}
               onClick={(event) => {
                 setupTriggerRef.current = event.currentTarget;
                 setPendingMatch("human-ai");
@@ -725,8 +897,98 @@ function ModePage({
               <span aria-hidden="true">→</span>
             </button>
           </article>
+
+          <article className="mode-card mode-card--lan">
+            <div className="mode-number">03</div>
+            <div className="mode-icon mode-icon--lan" aria-hidden="true">
+              <i />
+              <i />
+            </div>
+            <p className="mode-kicker">同一 Wi-Fi 下的两台设备</p>
+            <h2>局域网对战</h2>
+            <p>
+              各用各的手机、平板或电脑，各自只看到自己的一方。开局后把房间码给对方即可。
+            </p>
+            <ul>
+              <li>建房后生成 6 位房间码</li>
+              <li>悔棋需对方同意</li>
+              <li>对手掉线可重新邀请</li>
+            </ul>
+
+            <div className="lan-switch-row">
+              <div className="lan-switch-label">
+                <h3 id="lan-mode-title">允许同一网络的设备连接</h3>
+              </div>
+              <button
+                type="button"
+                className={`switch-control ${network?.mode === "lan" ? "is-on" : ""}`}
+                role="switch"
+                aria-checked={network?.mode === "lan"}
+                aria-labelledby="lan-mode-title"
+                disabled={busy || !network?.local || network.pending}
+                onClick={() => onToggleLan(network?.mode !== "lan")}
+              >
+                <span />
+              </button>
+            </div>
+            <div className="lan-switch-note">
+              {/* Stated where the decision is made, not buried in docs. */}
+              <small>
+                {!network?.local
+                  ? "你正在从其他设备访问，只有运行服务的那台机器可以切换。"
+                  : network.pending
+                    ? `正在切换到${network.targetMode === "lan" ? "局域网" : "仅本机"}监听…`
+                    : !network.listening
+                      ? "服务当前没有可用的网络监听。"
+                      : network.mode === "lan"
+                        ? network.addresses.length
+                          ? `其他设备可通过 ${network.addresses.length} 个候选地址访问。`
+                          : "已开启，但没有检测到可用的局域网地址。"
+                        : "关闭时服务只监听本机，别人扫不到。请只在可信的家庭网络下开启。"}
+              </small>
+              {network?.error && <small role="alert">{network.error}</small>}
+            </div>
+
+            <div className="lan-actions">
+              <button
+                type="button"
+                className="primary-button mode-start"
+                disabled={busy || remoteViewer}
+                onClick={(event) => {
+                  setupTriggerRef.current = event.currentTarget;
+                  setPendingMatch("lan-human");
+                }}
+              >
+                创建房间 <span aria-hidden="true">→</span>
+              </button>
+              <button
+                type="button"
+                className="lan-join-open"
+                disabled={busy}
+                onClick={(event) => {
+                  setupTriggerRef.current = event.currentTarget;
+                  setJoining(true);
+                }}
+              >
+                我有房间码，加入对局
+              </button>
+            </div>
+          </article>
         </div>
       </main>
+
+      {joining && (
+        <JoinRoomDialog
+          busy={busy}
+          initialCode={joinPrefill ?? ""}
+          onCancel={() => setJoining(false)}
+          onConfirm={(code) => {
+            setJoining(false);
+            onJoin(code);
+          }}
+          returnFocusRef={setupTriggerRef}
+        />
+      )}
 
       {pendingMatch && (
         <GameSetupDialog
@@ -758,6 +1020,12 @@ interface BoardProps {
   motion: BoardMotion | null;
   arrivalPieceId: string | null;
   disabled: boolean;
+  /**
+   * Which colour sits at the bottom. Omitted for same-screen and human-AI, so
+   * those keep deriving the orientation from `players.player1` exactly as
+   * before; LAN passes the device's own seat so each player faces their side.
+   */
+  bottomSide?: Color;
   onSquare: (position: Position) => void;
 }
 
@@ -807,9 +1075,10 @@ function Board({
   motion,
   arrivalPieceId,
   disabled,
+  bottomSide,
   onSquare,
 }: BoardProps) {
-  const flipped = game.players.player1 === "black";
+  const flipped = (bottomSide ?? game.players.player1) === "black";
   const bottomColor: Color = flipped ? "black" : "red";
   const topColor: Color = bottomColor === "red" ? "black" : "red";
   const [focusedSquare, setFocusedSquare] = useState<Position>({
@@ -877,7 +1146,7 @@ function Board({
     >
       <div className="board-player board-player--top">
         <span className={`side-dot side-dot--${topColor}`} />
-        <strong>{playerFor(game, topColor)}</strong>
+        <strong>{playerFor(game, topColor, bottomSide ?? null)}</strong>
         <span>{COLOR_LABELS[topColor]}</span>
         {game.turn === topColor && game.status.phase === "active" && (
           <em>行棋</em>
@@ -1039,7 +1308,7 @@ function Board({
       </div>
       <div className="board-player board-player--bottom">
         <span className={`side-dot side-dot--${bottomColor}`} />
-        <strong>{playerFor(game, bottomColor)}</strong>
+        <strong>{playerFor(game, bottomColor, bottomSide ?? null)}</strong>
         <span>{COLOR_LABELS[bottomColor]}</span>
         {game.turn === bottomColor && game.status.phase === "active" && (
           <em>行棋</em>
@@ -1228,8 +1497,10 @@ function CapturedTray({
   color,
   pieces,
   game,
+  seatColor = null,
 }: {
   color: Color;
+  seatColor?: Color | null;
   pieces: PublicCapturedPiece[];
   game: PublicGameState;
 }) {
@@ -1238,7 +1509,7 @@ function CapturedTray({
       <div className="captured-heading">
         <div>
           <span className={`side-dot side-dot--${color}`} />
-          <strong>{playerFor(game, color)}</strong>
+          <strong>{playerFor(game, color, seatColor)}</strong>
         </div>
         <small>
           {COLOR_LABELS[color]}吃得 · {pieces.length}
@@ -1271,14 +1542,16 @@ function StatusCard({
   selected,
   legalCount,
   agentStatus,
+  seatColor = null,
 }: {
   game: PublicGameState;
   selected?: PublicBoardPiece;
   legalCount: number;
   agentStatus?: AgentSessionState["status"];
+  seatColor?: Color | null;
 }) {
   const finished = game.status.phase === "finished";
-  const currentPlayer = playerFor(game, game.turn);
+  const currentPlayer = playerFor(game, game.turn, seatColor);
 
   return (
     <section
@@ -1406,7 +1679,13 @@ function AgentControllerCard({
   );
 }
 
-function AssignmentCard({ game }: { game: PublicGameState }) {
+function AssignmentCard({
+  game,
+  seatColor = null,
+}: {
+  game: PublicGameState;
+  seatColor?: Color | null;
+}) {
   return (
     <section className="game-card assignment-card">
       <div className="card-heading-row">
@@ -1415,13 +1694,13 @@ function AssignmentCard({ game }: { game: PublicGameState }) {
       <div className="assignment-row">
         <span className="side-dot side-dot--red" />
         <strong>红方</strong>
-        <span>{playerFor(game, "red")}</span>
+        <span>{playerFor(game, "red", seatColor)}</span>
         <small>先行</small>
       </div>
       <div className="assignment-row">
         <span className="side-dot side-dot--black" />
         <strong>黑方</strong>
-        <span>{playerFor(game, "black")}</span>
+        <span>{playerFor(game, "black", seatColor)}</span>
       </div>
     </section>
   );
@@ -1463,6 +1742,201 @@ function SeedCard({ seed }: { seed: string | null }) {
       </div>
       {copyState === "failed" && (
         <small role="alert">复制失败，请手动选中 Seed。</small>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Host-only. Shows the invite the guest needs, plus the opponent's live
+ * presence so the host knows when a re-invite is warranted.
+ */
+function LanRoomCard({
+  game,
+  seatColor,
+  roomCode,
+  addresses,
+  port,
+  busy,
+  onReinvite,
+}: {
+  game: PublicGameState;
+  seatColor: Color | null;
+  roomCode: string | null;
+  addresses: string[];
+  port: number;
+  busy: boolean;
+  onReinvite: () => void;
+}) {
+  const [copiedValue, setCopiedValue] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  useEffect(() => {
+    setCopiedValue(null);
+    setCopyFailed(false);
+  }, [roomCode, addresses]);
+
+  const isHost = Boolean(game.lan && seatColor === game.lan.host);
+  const finished = game.status.phase === "finished";
+  const waiting = isWaitingForOpponent(game);
+  const opponentOnline = isOpponentOnline(game, seatColor);
+  // Always an IP literal from the server: LAN mode refuses DNS names, so a
+  // link built from window.location could point somewhere the server rejects.
+  const joinLinks = roomCode
+    ? addresses.map((address) => ({
+        address,
+        url: joinUrlFor(address, port, roomCode),
+      }))
+    : [];
+
+  const handleCopy = async (value: string) => {
+    try {
+      await copyText(value);
+      setCopiedValue(value);
+      setCopyFailed(false);
+    } catch {
+      setCopyFailed(true);
+    }
+  };
+
+  return (
+    <section className="game-card lan-room-card">
+      <div className="card-heading-row">
+        <p className="card-label">局域网房间</p>
+        <span
+          className={`lan-presence lan-presence--${
+            finished
+              ? "offline"
+              : waiting
+                ? "waiting"
+                : opponentOnline
+                  ? "online"
+                  : "offline"
+          }`}
+          role="status"
+        >
+          {finished
+            ? "房间已结束"
+            : waiting
+              ? "等待对手加入"
+              : opponentOnline
+                ? "对手在线"
+                : "对手已断线"}
+        </span>
+      </div>
+
+      {isHost && roomCode ? (
+        <>
+          <div className="lan-code-row">
+            <code data-testid="lan-room-code">{roomCode}</code>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleCopy(roomCode)}
+            >
+              {copiedValue === roomCode ? "已复制" : "复制房间码"}
+            </button>
+          </div>
+          {joinLinks.length ? (
+            <div className="lan-join-url">
+              <p>请选择与对手处在同一网段的地址：</p>
+              <ul className="lan-join-links">
+                {joinLinks.map(({ address, url }) => (
+                  <li key={address}>
+                    <code>{url}</code>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={`复制 ${address} 邀请链接`}
+                      onClick={() => void handleCopy(url)}
+                    >
+                      {copiedValue === url ? "已复制" : "复制链接"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="lan-join-url lan-join-url--off">
+              未开启局域网监听时，对方无法从其他设备连接。
+            </p>
+          )}
+          {!finished && !waiting && !opponentOnline && (
+            <button
+              type="button"
+              className="lan-reinvite"
+              disabled={busy}
+              onClick={onReinvite}
+            >
+              重新邀请（作废旧房间码）
+            </button>
+          )}
+        </>
+      ) : (
+        <p className="lan-join-url">
+          你以{seatColor ? COLOR_LABELS[seatColor] : "访客"}身份加入了这一局。
+        </p>
+      )}
+      {copyFailed && <small role="alert">复制失败，请手动选中后复制。</small>}
+    </section>
+  );
+}
+
+/** Shown on the opponent's device while a takeback is awaiting an answer. */
+function UndoRequestPrompt({
+  game,
+  seatColor,
+  busy,
+  onResolve,
+}: {
+  game: PublicGameState;
+  seatColor: Color | null;
+  busy: boolean;
+  onResolve: (accept: boolean) => void;
+}) {
+  const request = game.lan?.undoRequest ?? null;
+  if (!request || !seatColor) return null;
+  const mine = request.requestedBy === seatColor;
+
+  return (
+    <section className="game-card lan-undo-prompt" role="alert">
+      <p className="card-label">悔棋协商</p>
+      {mine ? (
+        <>
+          <p>已向对手发出悔棋请求，等待回应。</p>
+          <div className="lan-undo-actions">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onResolve(false)}
+            >
+              取消请求
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p>对手请求撤回刚走的那一步。</p>
+          {/* Consent is informed on purpose: an approved takeback re-hides the
+              piece server-side, but the opponent has already seen it. */}
+          <small>同意后局面回退，但你已经看到的暗子身份不会被忘记。</small>
+          <div className="lan-undo-actions">
+            <button
+              type="button"
+              className="primary-button"
+              disabled={busy}
+              onClick={() => onResolve(true)}
+            >
+              同意悔棋
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onResolve(false)}
+            >
+              拒绝
+            </button>
+          </div>
+        </>
       )}
     </section>
   );
@@ -1514,6 +1988,7 @@ function GameResultDialog({
   onReview,
   onLeave,
   onHome,
+  seatColor = null,
 }: {
   game: PublicGameState;
   busy: boolean;
@@ -1521,6 +1996,7 @@ function GameResultDialog({
   onReview: () => void;
   onLeave: () => void;
   onHome: () => void;
+  seatColor?: Color | null;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
@@ -1531,10 +2007,15 @@ function GameResultDialog({
     : "对局结束";
   const title = winner ? `${COLOR_LABELS[winner]}胜` : "和棋";
   const capturedCount = game.captured.red.length + game.captured.black.length;
+  const wonIt =
+    winner !== null &&
+    (game.matchType === "human-ai"
+      ? game.players.player1 === winner
+      : game.matchType === "lan-human" && seatColor === winner);
   const winnerCopy = winner
-    ? game.matchType === "human-ai" && game.players.player1 === winner
+    ? wonIt
       ? "你拿下了这一局"
-      : `${playerFor(game, winner)} 执${COLOR_LABELS[winner]}获胜`
+      : `${playerFor(game, winner, seatColor)} 执${COLOR_LABELS[winner]}获胜`
     : "双方握手言和";
 
   return (
@@ -1586,13 +2067,17 @@ function GameResultDialog({
             type="button"
             className="result-primary"
             disabled={busy}
-            onClick={onRestart}
+            onClick={game.matchType === "lan-human" ? onReview : onRestart}
           >
-            同 Seed 再来
+            {/* A LAN rematch needs a fresh room and a new invite, and
+                `restart` would POST an unaccepted matchType. */}
+            {game.matchType === "lan-human" ? "查看最终棋盘" : "同 Seed 再来"}
           </button>
-          <button type="button" disabled={busy} onClick={onReview}>
-            查看最终棋盘
-          </button>
+          {game.matchType !== "lan-human" && (
+            <button type="button" disabled={busy} onClick={onReview}>
+              查看最终棋盘
+            </button>
+          )}
           <button type="button" disabled={busy} onClick={onLeave}>
             返回对战选择
           </button>
@@ -1631,6 +2116,12 @@ function GamePage({
   onRestart,
   onLeave,
   onHome,
+  seat,
+  seatColor,
+  network,
+  onReinvite,
+  onResolveUndo,
+  onRejoin,
 }: {
   game: PublicGameState;
   moves: LegalMove[];
@@ -1652,6 +2143,12 @@ function GamePage({
   onRestart: () => void;
   onLeave: () => void;
   onHome: () => void;
+  seat: LanSeatRecord | null;
+  seatColor: Color | null;
+  network: NetworkStatusResponse | null;
+  onReinvite: () => void;
+  onResolveUndo: (accept: boolean) => void;
+  onRejoin: () => void;
 }) {
   const selected = game.board.find((piece) => piece.id === selectedId);
   const selectedMoves = selectedId
@@ -1659,9 +2156,29 @@ function GamePage({
     : [];
   const isAiTurn =
     game.matchType === "human-ai" && game.players.player2 === game.turn;
+  const lan = game.matchType === "lan-human";
+  const myTurn = isMySeatTurn(game, seatColor);
+  const waitingForOpponent = lan && isWaitingForOpponent(game);
+  const revoked = lan && isSeatRevoked(game, seat);
   const canResign =
     game.status.phase === "active" &&
-    (game.matchType === "human-human" || game.players.player1 === game.turn);
+    !revoked &&
+    (lan
+      ? // A LAN seat concedes its own side, so it must work on either turn —
+        // otherwise the button would be dead half the time.
+        seatColor !== null
+      : game.matchType === "human-human" || game.players.player1 === game.turn);
+  // A takeback rewinds the last ply, which belongs to whoever is not on turn.
+  const canRequestUndo = lan
+    ? !revoked &&
+      seatColor !== null &&
+      seatColor !== game.turn &&
+      !waitingForOpponent &&
+      // The negotiation only exists while the game is running; a request made
+      // after the result would be dropped by the next projection.
+      game.status.phase === "active" &&
+      !game.lan?.undoRequest
+    : true;
   const resultKey = `${game.id}:${game.revision}`;
   const [reviewedResult, setReviewedResult] = useState<string | null>(null);
   const showResult =
@@ -1681,14 +2198,32 @@ function GamePage({
           aria-label="对局信息与操作"
         >
           <div className="sidebar-title">
-            <p className="eyebrow">
-              {game.matchType === "human-ai" ? "人机对战" : "人人对战"}
-            </p>
+            <p className="eyebrow">{MATCH_LABELS[game.matchType]}</p>
             <h1>{MODE_LABELS[game.mode]}</h1>
           </div>
-          <AssignmentCard game={game} />
+          <AssignmentCard game={game} seatColor={seatColor} />
+          {lan && (
+            <LanRoomCard
+              game={game}
+              seatColor={seatColor}
+              roomCode={game.lan?.roomCode ?? null}
+              addresses={network?.addresses ?? []}
+              port={network?.port ?? 3001}
+              busy={busy}
+              onReinvite={onReinvite}
+            />
+          )}
+          {lan && !revoked && game.lan?.undoRequest && (
+            <UndoRequestPrompt
+              game={game}
+              seatColor={seatColor}
+              busy={busy}
+              onResolve={onResolveUndo}
+            />
+          )}
           <SeedCard seed={game.seed} />
           <StatusCard
+            seatColor={seatColor}
             game={game}
             selected={selected}
             legalCount={selectedMoves.length}
@@ -1711,16 +2246,22 @@ function GamePage({
               title={
                 !game.allowUndo
                   ? "本局未开启悔棋"
-                  : game.canUndo
-                    ? game.matchType === "human-ai"
-                      ? "回到你上次落子前"
-                      : "撤回最近一步"
-                    : "当前没有可撤回的着法"
+                  : lan && waitingForOpponent
+                    ? "等待对手加入后才能请求悔棋"
+                    : game.canUndo
+                      ? game.matchType === "human-ai"
+                        ? "回到你上次落子前"
+                        : game.matchType === "lan-human"
+                          ? "向对手请求撤回你刚走的那一步"
+                          : "撤回最近一步"
+                      : "当前没有可撤回的着法"
               }
-              disabled={busy || Boolean(motion) || !game.canUndo}
+              disabled={
+                busy || Boolean(motion) || !game.canUndo || !canRequestUndo
+              }
               onClick={onUndo}
             >
-              悔棋
+              {lan ? "请求悔棋" : "悔棋"}
             </button>
             <button
               type="button"
@@ -1729,18 +2270,22 @@ function GamePage({
               onClick={onResign}
             >
               {resignArmed
-                ? `确认${COLOR_LABELS[game.turn]}认输`
+                ? `确认${COLOR_LABELS[lan && seatColor ? seatColor : game.turn]}认输`
                 : isAiTurn
                   ? "模型回合中"
-                  : "当前方认输"}
+                  : lan
+                    ? "认输"
+                    : "当前方认输"}
             </button>
-            <button
-              type="button"
-              disabled={busy || Boolean(motion) || !game.seed}
-              onClick={onRestart}
-            >
-              {game.seed ? "同 Seed 再来" : "终局后可同 Seed 再来"}
-            </button>
+            {!lan && (
+              <button
+                type="button"
+                disabled={busy || Boolean(motion) || !game.seed}
+                onClick={onRestart}
+              >
+                {game.seed ? "同 Seed 再来" : "终局后可同 Seed 再来"}
+              </button>
+            )}
             {game.status.phase === "finished" &&
               reviewedResult === resultKey && (
                 <button type="button" onClick={() => setReviewedResult(null)}>
@@ -1784,16 +2329,40 @@ function GamePage({
               </button>
             </div>
           )}
+          {lan &&
+            game.status.phase === "active" &&
+            (waitingForOpponent || revoked) && (
+              <div className="lan-block" role="alert">
+                {revoked ? (
+                  <>
+                    <strong>你已被移出对局</strong>
+                    <span>房主重新生成了房间码，请用新的房间码重新加入。</span>
+                    <button type="button" disabled={busy} onClick={onRejoin}>
+                      重新加入
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <strong>等待对手加入</strong>
+                    <span>把房间码发给对方，对方加入后即可开始。</span>
+                  </>
+                )}
+              </div>
+            )}
           <Board
             game={game}
             legalMoves={selectedMoves}
             selectedId={selectedId}
             motion={motion}
             arrivalPieceId={arrivalPieceId}
+            bottomSide={lan ? (seatColor ?? undefined) : undefined}
             disabled={
               busy ||
               Boolean(motion) ||
               isAiTurn ||
+              !myTurn ||
+              waitingForOpponent ||
+              revoked ||
               game.status.phase === "finished" ||
               Boolean(movesError)
             }
@@ -1810,11 +2379,17 @@ function GamePage({
             <h2>吃子区</h2>
             <p>暗子被吃时会在这里公开真实身份。</p>
           </div>
-          <CapturedTray color="red" pieces={game.captured.red} game={game} />
+          <CapturedTray
+            color="red"
+            pieces={game.captured.red}
+            game={game}
+            seatColor={seatColor}
+          />
           <CapturedTray
             color="black"
             pieces={game.captured.black}
             game={game}
+            seatColor={seatColor}
           />
         </aside>
       </main>
@@ -1822,6 +2397,7 @@ function GamePage({
         <GameResultDialog
           game={game}
           busy={busy}
+          seatColor={seatColor}
           onRestart={onRestart}
           onReview={() => setReviewedResult(resultKey)}
           onLeave={onLeave}
@@ -1852,18 +2428,26 @@ export function App({ api = gameApi }: { api?: GameApi }) {
   const [boardMotion, setBoardMotion] = useState<BoardMotion | null>(null);
   const [arrivalPieceId, setArrivalPieceId] = useState<string | null>(null);
   const [movesError, setMovesError] = useState<string | null>(null);
-  const [resumeGameId, setResumeGameId] = useState<string | null>(() => {
-    try {
-      return window.localStorage.getItem(LAST_GAME_STORAGE_KEY);
-    } catch {
-      return null;
-    }
-  });
+  const [resumeGameId, setResumeGameId] = useState<string | null>(
+    initialRecoveryGameId,
+  );
+  const [seat, setSeat] = useState<LanSeatRecord | null>(() =>
+    readSeatRecord(),
+  );
+  const [network, setNetwork] = useState<NetworkStatusResponse | null>(null);
+  // Read once at mount and stripped from the URL immediately, so a shared
+  // invite link does not linger in history or a referrer.
+  const [joinPrefill, setJoinPrefill] = useState<string | null>(() =>
+    takeRoomCodeFromLocation(),
+  );
   const gameRef = useRef<PublicGameState | null>(null);
+  const seatRef = useRef<LanSeatRecord | null>(seat);
   const arrivalTimerRef = useRef<number | null>(null);
   const legalRetryTimerRef = useRef<number | null>(null);
   const syncControllerRef = useRef<AbortController | null>(null);
   const agentControllerRef = useRef<AbortController | null>(null);
+  const networkRefreshControllerRef = useRef<AbortController | null>(null);
+  const networkTransitionRef = useRef(false);
   const syncInFlightRef = useRef(false);
   const startInFlightRef = useRef(false);
   const responseSequenceRef = useRef(0);
@@ -1872,6 +2456,163 @@ export function App({ api = gameApi }: { api?: GameApi }) {
   useEffect(() => {
     gameRef.current = game;
   }, [game]);
+
+  useEffect(() => {
+    seatRef.current = seat;
+  }, [seat]);
+
+  const seatColor = seatColorFor(game, seat);
+  /** The token this device should present, if it holds this game's seat. */
+  const seatTokenFor = useCallback((gameId: string): string | undefined => {
+    const record = seatRef.current;
+    return record && record.gameId === gameId ? record.token : undefined;
+  }, []);
+
+  const rememberRecoverySeat = useCallback((record: LanSeatRecord) => {
+    seatRef.current = record;
+    setSeat(record);
+    setResumeGameId(record.gameId);
+  }, []);
+
+  /**
+   * Clears one specific credential. If another tab replaced it while an API
+   * call was in flight, adopt that newer record instead and ask the caller to
+   * reconcile it before starting another game.
+   */
+  const forgetSeat = useCallback(
+    (expected: LanSeatRecord | null = seatRef.current): ForgetSeatResult => {
+      const memory = seatRef.current;
+      if (expected && memory && !sameSeatCredential(memory, expected)) {
+        return "replaced";
+      }
+      const discardedGameId = expected?.gameId ?? memory?.gameId;
+      const cleared = clearSeatRecord(expected ?? undefined);
+      const replacement = readSeatRecord();
+      if (
+        expected &&
+        replacement &&
+        !sameSeatCredential(replacement, expected)
+      ) {
+        rememberRecoverySeat(replacement);
+        return "replaced";
+      }
+      if (
+        expected &&
+        seatRef.current &&
+        !sameSeatCredential(seatRef.current, expected)
+      ) {
+        return "replaced";
+      }
+      if (!cleared) return "storage-failed";
+      setSeat(null);
+      seatRef.current = null;
+      setResumeGameId((current) => {
+        if (discardedGameId && current !== discardedGameId) return current;
+        try {
+          const stored = window.localStorage.getItem(LAST_GAME_STORAGE_KEY);
+          if (!discardedGameId || stored === discardedGameId) {
+            window.localStorage.removeItem(LAST_GAME_STORAGE_KEY);
+          }
+        } catch {
+          // In-memory recovery state still needs to reflect the discarded seat.
+        }
+        return null;
+      });
+      return "forgotten";
+    },
+    [rememberRecoverySeat],
+  );
+
+  /**
+   * There is room for one recoverable seat in this browser. Before starting a
+   * different game, explicitly end a still-active stored room; a transient
+   * read/write failure leaves the credential untouched and aborts replacement.
+   * Re-read storage on every pass because another tab may have issued a newer
+   * one-time seat while this tab was waiting for the network.
+   */
+  const releaseRecoverableSeat = useCallback(async (): Promise<boolean> => {
+    while (true) {
+      const record = latestSeatRecord(seatRef.current, readSeatRecord());
+      if (!record) return true;
+      const finishRecovery = (): "retry" | "complete" | "failed" => {
+        const result = forgetSeat(record);
+        if (result === "replaced") return "retry";
+        if (result === "storage-failed") {
+          setError(
+            "浏览器无法安全更新局域网座位记录，请释放站点存储空间后重试。",
+          );
+          return "failed";
+        }
+        return "complete";
+      };
+      const alreadyHeldInThisTab = Boolean(
+        seatRef.current && sameSeatCredential(seatRef.current, record),
+      );
+      if (!seatRef.current || !sameSeatCredential(seatRef.current, record)) {
+        rememberRecoverySeat(record);
+      }
+
+      let storedGame =
+        alreadyHeldInThisTab && gameRef.current?.id === record.gameId
+          ? gameRef.current
+          : null;
+      if (!storedGame) {
+        try {
+          storedGame = await api.getGame(
+            record.gameId,
+            undefined,
+            record.token,
+          );
+        } catch (caught) {
+          if (
+            caught instanceof ApiClientError &&
+            caught.code === "GAME_NOT_FOUND"
+          ) {
+            const result = finishRecovery();
+            if (result === "retry") continue;
+            return result === "complete";
+          }
+          setError(
+            caught instanceof Error
+              ? `无法确认待恢复的局域网对局：${caught.message}`
+              : "无法确认待恢复的局域网对局，请稍后重试。",
+          );
+          return false;
+        }
+      }
+
+      const validLanSeat =
+        storedGame.matchType === "lan-human" &&
+        seatColorFor(storedGame, record) !== null &&
+        !isSeatRevoked(storedGame, record);
+      if (storedGame.status.phase === "finished" || !validLanSeat) {
+        const result = finishRecovery();
+        if (result === "retry") continue;
+        return result === "complete";
+      }
+      if (
+        !window.confirm(
+          "你还有一局可恢复的局域网对局。开始新局将视为认输并结束旧房间，是否继续？",
+        )
+      ) {
+        return false;
+      }
+
+      try {
+        await api.resign(storedGame.id, storedGame.revision, record.token);
+        const result = finishRecovery();
+        if (result === "retry") continue;
+        return result === "complete";
+      } catch (caught) {
+        setError(
+          caught instanceof Error
+            ? `结束待恢复对局失败：${caught.message}`
+            : "结束待恢复对局失败，请稍后重试。",
+        );
+        return false;
+      }
+    }
+  }, [api, forgetSeat, rememberRecoverySeat]);
 
   useEffect(
     () => () => {
@@ -1883,6 +2624,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
       }
       syncControllerRef.current?.abort();
       agentControllerRef.current?.abort();
+      networkRefreshControllerRef.current?.abort();
     },
     [],
   );
@@ -2053,6 +2795,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
   }, [aiStatus, inspectAiModels, loadingModels, view]);
 
   const startGame = async (options: GameLaunchOptions) => {
+    if (options.matchType === "lan-human") return;
     if (startInFlightRef.current) return;
     startInFlightRef.current = true;
     const request: CreateGameRequest = {
@@ -2072,6 +2815,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
     setBoardMotion(null);
     setArrivalPieceId(null);
     try {
+      if (!(await releaseRecoverableSeat())) return;
       if (previousGame?.matchType === "human-ai") {
         await api.stopAgentSession(previousGame.id).catch(() => undefined);
       }
@@ -2120,7 +2864,13 @@ export function App({ api = gameApi }: { api?: GameApi }) {
       syncControllerRef.current = controller;
       syncInFlightRef.current = true;
       try {
-        const nextGame = await api.getGame(current.id, controller.signal);
+        // Sending the seat token doubles as this device's presence heartbeat,
+        // so the opponent's online indicator costs no extra request.
+        const nextGame = await api.getGame(
+          current.id,
+          controller.signal,
+          seatTokenFor(current.id),
+        );
         if (controller.signal.aborted || gameRef.current?.id !== current.id)
           return;
         if (nextGame.revision > current.revision) {
@@ -2135,6 +2885,21 @@ export function App({ api = gameApi }: { api?: GameApi }) {
             syncInFlightRef.current = false;
           }
           await adoptGame(nextGame);
+        } else if (
+          nextGame.revision === current.revision &&
+          lanStateChanged(current, nextGame) &&
+          gameRef.current?.revision === current.revision
+        ) {
+          // A guest joining, going offline, or answering a takeback does not
+          // move a piece, so `revision` never changes and the branches above
+          // never fire. Without this the host would sit on 「等待对手加入」
+          // forever while the guest was already playing.
+          //
+          // setGame, NOT adoptGame: adoptGame refetches legal moves and clears
+          // the selection, which would wipe the piece you are holding roughly
+          // once a second.
+          setGame(nextGame);
+          gameRef.current = nextGame;
         }
       } catch (caught) {
         if (!controller.signal.aborted && !quiet) {
@@ -2147,7 +2912,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
         }
       }
     },
-    [adoptGame, api, movesError, transitionToGame],
+    [adoptGame, api, movesError, seatTokenFor, transitionToGame],
   );
 
   const refreshAgentSession = useCallback(
@@ -2220,12 +2985,293 @@ export function App({ api = gameApi }: { api?: GameApi }) {
     ? moves.filter((move) => move.pieceId === selectedId)
     : [];
 
+  /** Adopts a freshly claimed seat and its game in one step. */
+  const adoptSeat = useCallback(
+    async (
+      nextGame: PublicGameState,
+      record: Omit<LanSeatRecord, "savedAt" | "storageId" | "generation">,
+    ) => {
+      // The freshly issued credential is authoritative in memory. Storage is
+      // only best-effort refresh recovery and may be unavailable or full.
+      const claimed = createSeatRecord(record);
+      setSeat(claimed);
+      seatRef.current = claimed;
+      writeSeatRecord(claimed);
+      await adoptGame(nextGame);
+      setView("game");
+    },
+    [adoptGame],
+  );
+
+  const startLanGame = async (options: GameLaunchOptions) => {
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    setAgentSession(null);
+    setBoardMotion(null);
+    setArrivalPieceId(null);
+    try {
+      if (!(await releaseRecoverableSeat())) return;
+      const created = await api.createRoom({
+        mode: options.mode,
+        allowDraw: options.allowDraw,
+        allowUndo: options.allowUndo,
+        ...(options.seed ? { seed: options.seed } : {}),
+      });
+      if (options.seed) setCustomSeed(options.seed.trim().normalize("NFC"));
+      await adoptSeat(created.game, {
+        gameId: created.game.id,
+        color: created.seat.color,
+        token: created.seat.token,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "建房失败，请重试。");
+    } finally {
+      startInFlightRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const joinLanGame = async (roomCode: string) => {
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    setAgentSession(null);
+    setBoardMotion(null);
+    setArrivalPieceId(null);
+    try {
+      if (!(await releaseRecoverableSeat())) return;
+      const joined = await api.joinRoom(normalizeRoomCodeInput(roomCode));
+      setJoinPrefill(null);
+      await adoptSeat(joined.game, {
+        gameId: joined.game.id,
+        color: joined.seat.color,
+        token: joined.seat.token,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "加入失败，请重试。");
+    } finally {
+      startInFlightRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const handleReinvite = async () => {
+    const current = gameRef.current;
+    const token = current ? seatTokenFor(current.id) : undefined;
+    const roomCode = current?.lan?.roomCode;
+    if (
+      !current ||
+      !token ||
+      !roomCode ||
+      busy ||
+      isSeatRevoked(current, seatRef.current)
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.reinvite(
+        current.id,
+        current.revision,
+        roomCode,
+        token,
+      );
+      setGame(result.game);
+      gameRef.current = result.game;
+      // The code itself comes back through `game.lan.roomCode` on every read,
+      // so only the seat needs persisting.
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "重新邀请失败，请重试。",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResolveUndo = async (accept: boolean) => {
+    const current = gameRef.current;
+    const token = current ? seatTokenFor(current.id) : undefined;
+    const requestId = current?.lan?.undoRequest?.id;
+    if (
+      !current ||
+      !token ||
+      !requestId ||
+      busy ||
+      isSeatRevoked(current, seatRef.current)
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.resolveUndo(
+        current.id,
+        current.revision,
+        requestId,
+        accept,
+        token,
+      );
+      // Approval rewinds the position, so re-adopt; a decline only clears
+      // the prompt and must not disturb the board.
+      if (next.revision > current.revision)
+        await transitionToGame(next, current);
+      else {
+        setGame(next);
+        gameRef.current = next;
+      }
+    } catch (caught) {
+      if (
+        caught instanceof ApiClientError &&
+        caught.code === "STALE_REVISION"
+      ) {
+        await refresh();
+      }
+      setError(caught instanceof Error ? caught.message : "处理悔棋失败。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshNetwork = useCallback(async () => {
+    if (networkTransitionRef.current) return;
+    networkRefreshControllerRef.current?.abort();
+    const controller = new AbortController();
+    networkRefreshControllerRef.current = controller;
+    try {
+      const status = await api.getNetwork(controller.signal);
+      if (!controller.signal.aborted && !networkTransitionRef.current) {
+        setNetwork(status);
+      }
+    } catch {
+      // The toggle simply stays unavailable; nothing else depends on it.
+    } finally {
+      if (networkRefreshControllerRef.current === controller) {
+        networkRefreshControllerRef.current = null;
+      }
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshNetwork();
+    const timer = window.setInterval(
+      () => void refreshNetwork(),
+      NETWORK_STATUS_REFRESH_INTERVAL_MS,
+    );
+    const handleFocus = () => void refreshNetwork();
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", handleFocus);
+      networkRefreshControllerRef.current?.abort();
+      networkRefreshControllerRef.current = null;
+    };
+  }, [refreshNetwork]);
+
+  // A five-second foreground confirmation timeout is a UX boundary, not a
+  // reason to abandon the controller. Once the button is released, continue
+  // reconciling a pending transition until the server reports a terminal
+  // state, so a long FIFO never requires a page reload.
+  useEffect(() => {
+    if (busy || !network?.pending) return;
+    let cancelled = false;
+    let timer: number | null = null;
+
+    function schedule() {
+      timer = window.setTimeout(
+        () => void reconcile(),
+        NETWORK_RECONCILE_INTERVAL_MS,
+      );
+    }
+    async function reconcile() {
+      try {
+        const status = await api.getNetwork();
+        if (cancelled) return;
+        setNetwork(status);
+        if (status.pending) {
+          schedule();
+        } else if (status.error) {
+          setError(status.error);
+        } else if (!status.listening) {
+          setError("监听切换失败，服务当前没有可用端口。");
+        } else {
+          setError((current) =>
+            current === "监听切换确认超时，请检查服务状态后重试。"
+              ? null
+              : current,
+          );
+        }
+      } catch {
+        if (!cancelled) schedule();
+      }
+    }
+
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [api, busy, network?.pending]);
+
+  // Arriving through a shared invite link jumps straight to the join step.
+  useEffect(() => {
+    if (joinPrefill) setView("mode");
+  }, [joinPrefill]);
+
+  const handleToggleLan = async (enabled: boolean) => {
+    networkTransitionRef.current = true;
+    networkRefreshControllerRef.current?.abort();
+    networkRefreshControllerRef.current = null;
+    setBusy(true);
+    setError(null);
+    const targetMode = enabled ? "lan" : "loopback";
+    try {
+      let status = await api.setNetworkMode(targetMode);
+      setNetwork(status);
+      const deadline = Date.now() + NETWORK_SWITCH_TIMEOUT_MS;
+
+      while (
+        status.pending ||
+        status.mode !== targetMode ||
+        !status.listening
+      ) {
+        if (!status.pending && status.error) throw new Error(status.error);
+        if (!status.pending && !status.listening) {
+          throw new Error("监听切换失败，服务当前没有可用端口。");
+        }
+        if (Date.now() >= deadline) {
+          throw new Error("监听切换确认超时，请检查服务状态后重试。");
+        }
+
+        await wait(NETWORK_POLL_INTERVAL_MS);
+        try {
+          status = await api.getNetwork();
+          setNetwork(status);
+        } catch {
+          // Closing the old listener can briefly break the poll. Retry until
+          // the five-second deadline instead of treating that gap as failure.
+        }
+      }
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "切换局域网监听失败。",
+      );
+    } finally {
+      networkTransitionRef.current = false;
+      setBusy(false);
+    }
+  };
+
   const handleSquare = async (position: Position) => {
     if (
       !game ||
       busy ||
       boardMotion ||
       isAiTurn ||
+      !isMySeatTurn(game, seatColor) ||
+      isSeatRevoked(game, seatRef.current) ||
       game.status.phase === "finished"
     ) {
       return;
@@ -2247,6 +3293,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
           selected.position,
           chosenMove.to,
           game.revision,
+          seatTokenFor(game.id),
         );
         await transitionToGame(nextGame, game);
       } catch (caught) {
@@ -2277,6 +3324,12 @@ export function App({ api = gameApi }: { api?: GameApi }) {
       return;
     if (game.matchType === "human-ai" && game.players.player1 !== game.turn)
       return;
+    // A LAN player may concede at any time, but only from their own seat.
+    if (
+      game.matchType === "lan-human" &&
+      (!seatColor || isSeatRevoked(game, seatRef.current))
+    )
+      return;
     if (!resignArmed) {
       setResignArmed(true);
       return;
@@ -2284,7 +3337,9 @@ export function App({ api = gameApi }: { api?: GameApi }) {
     setBusy(true);
     setError(null);
     try {
-      await adoptGame(await api.resign(game.id, game.revision));
+      await adoptGame(
+        await api.resign(game.id, game.revision, seatTokenFor(game.id)),
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "认输失败，请重试。");
     } finally {
@@ -2294,10 +3349,23 @@ export function App({ api = gameApi }: { api?: GameApi }) {
 
   const handleUndo = async () => {
     if (!game || busy || boardMotion || !game.canUndo) return;
+    if (game.matchType === "lan-human" && isSeatRevoked(game, seatRef.current))
+      return;
     setBusy(true);
     setError(null);
     setArrivalPieceId(null);
     try {
+      if (game.matchType === "lan-human") {
+        // Only asks; the opponent's approval is what actually rewinds.
+        const token = seatTokenFor(game.id);
+        if (!token) throw new Error("尚未持有本局座位。");
+        const requested = await api.requestUndo(game.id, game.revision, token);
+        setGame(requested);
+        // gameRef is only re-synced by a post-commit effect, so the 1s poll
+        // would otherwise diff against a stale snapshot for one tick.
+        gameRef.current = requested;
+        return;
+      }
       await adoptGame(await api.undo(game.id, game.revision));
     } catch (caught) {
       if (
@@ -2322,7 +3390,15 @@ export function App({ api = gameApi }: { api?: GameApi }) {
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, []);
 
-  const clearCurrentGame = (nextView: AppView) => {
+  const clearCurrentGame = (
+    nextView: AppView,
+    { clearSeat = false }: { clearSeat?: boolean } = {},
+  ) => {
+    const preservedSeat = clearSeat
+      ? forgetSeat() === "forgotten"
+        ? null
+        : seatRef.current
+      : seatRef.current;
     syncControllerRef.current?.abort();
     syncControllerRef.current = null;
     syncInFlightRef.current = false;
@@ -2337,43 +3413,104 @@ export function App({ api = gameApi }: { api?: GameApi }) {
     setArrivalPieceId(null);
     setAgentSession(null);
     try {
-      window.localStorage.removeItem(LAST_GAME_STORAGE_KEY);
-      setResumeGameId(null);
+      if (preservedSeat) {
+        window.localStorage.setItem(
+          LAST_GAME_STORAGE_KEY,
+          preservedSeat.gameId,
+        );
+      } else {
+        window.localStorage.removeItem(LAST_GAME_STORAGE_KEY);
+      }
     } catch {
       // Ignore unavailable local storage.
     }
+    setResumeGameId(preservedSeat?.gameId ?? null);
     setView(nextView);
   };
 
-  const confirmActiveLeave = (current: PublicGameState | null): boolean =>
-    !current ||
-    current.status.phase !== "active" ||
-    window.confirm("对局仍在进行。确认离开并停止本地控制器吗？");
+  const confirmActiveLeave = (current: PublicGameState | null): boolean => {
+    if (!current || current.status.phase !== "active") return true;
+    const activeLanSeat =
+      current.matchType === "lan-human" &&
+      Boolean(seatTokenFor(current.id)) &&
+      !isSeatRevoked(current, seatRef.current);
+    return window.confirm(
+      activeLanSeat
+        ? "对局仍在进行。离开将视为认输并结束本局，是否继续？"
+        : "对局仍在进行。确认离开并停止本地控制器吗？",
+    );
+  };
 
-  const leaveGame = () => {
+  const departGame = async (nextView: AppView) => {
     const current = gameRef.current;
+    const currentSeat = seatRef.current;
+    const ownsCurrentSeat = Boolean(
+      current?.matchType === "lan-human" &&
+      currentSeat &&
+      currentSeat.gameId === current.id,
+    );
     if (!confirmActiveLeave(current)) return;
+    if (
+      current?.matchType === "lan-human" &&
+      current.status.phase === "active" &&
+      !isSeatRevoked(current, seatRef.current)
+    ) {
+      const token = seatTokenFor(current.id);
+      if (token) {
+        setBusy(true);
+        setError(null);
+        try {
+          // Do not erase the one-time seat while its room is still live. A
+          // confirmed departure first ends the game; on failure the seat and
+          // resume state remain available so the host cannot be stranded.
+          await api.resign(current.id, current.revision, token);
+        } catch (caught) {
+          if (
+            caught instanceof ApiClientError &&
+            caught.code === "STALE_REVISION"
+          ) {
+            await refresh();
+          }
+          setError(
+            caught instanceof Error
+              ? `离开对局失败：${caught.message}`
+              : "离开对局失败，请重试。",
+          );
+          return;
+        } finally {
+          setBusy(false);
+        }
+      }
+    }
     if (current?.matchType === "human-ai") {
       void api.stopAgentSession(current.id).catch(() => undefined);
     }
-    clearCurrentGame("mode");
+    clearCurrentGame(nextView, { clearSeat: ownsCurrentSeat });
   };
 
-  const goHome = () => {
-    const current = gameRef.current;
-    if (!confirmActiveLeave(current)) return;
-    if (current?.matchType === "human-ai") {
-      void api.stopAgentSession(current.id).catch(() => undefined);
-    }
-    clearCurrentGame("home");
-  };
+  const leaveGame = () => void departGame("mode");
+
+  const goHome = () => void departGame("home");
 
   const resumeLastGame = async () => {
     if (!resumeGameId || busy) return;
+    const requestedGameId = resumeGameId;
     setBusy(true);
     setError(null);
     try {
-      const restored = await api.getGame(resumeGameId);
+      const restoredSeat =
+        seatRef.current?.gameId === requestedGameId
+          ? seatRef.current
+          : readSeatRecord(requestedGameId);
+      const restored = await api.getGame(
+        requestedGameId,
+        undefined,
+        restoredSeat?.token,
+      );
+      if (restoredSeat && seatRef.current?.gameId !== restoredSeat.gameId) {
+        setSeat(restoredSeat);
+        seatRef.current = restoredSeat;
+      }
       await adoptGame(restored);
       setView("game");
       if (restored.matchType === "human-ai") {
@@ -2398,12 +3535,38 @@ export function App({ api = gameApi }: { api?: GameApi }) {
         }
       }
     } catch (caught) {
-      try {
-        window.localStorage.removeItem(LAST_GAME_STORAGE_KEY);
-      } catch {
-        // Ignore unavailable local storage.
+      if (
+        caught instanceof ApiClientError &&
+        caught.code === "GAME_NOT_FOUND"
+      ) {
+        const expectedSeat =
+          seatRef.current?.gameId === requestedGameId
+            ? seatRef.current
+            : readSeatRecord(requestedGameId);
+        const forgetResult = expectedSeat
+          ? forgetSeat(expectedSeat)
+          : "forgotten";
+        if (forgetResult === "forgotten") {
+          try {
+            if (
+              window.localStorage.getItem(LAST_GAME_STORAGE_KEY) ===
+              requestedGameId
+            ) {
+              window.localStorage.removeItem(LAST_GAME_STORAGE_KEY);
+            }
+          } catch {
+            // Ignore unavailable local storage.
+          }
+          setResumeGameId((current) =>
+            current === requestedGameId ? null : current,
+          );
+        } else if (forgetResult === "storage-failed") {
+          setError(
+            "没有找到该对局，但浏览器无法安全清理座位记录；请释放站点存储空间后重试。",
+          );
+          return;
+        }
       }
-      setResumeGameId(null);
       setError(caught instanceof Error ? caught.message : "无法恢复上局。");
     } finally {
       setBusy(false);
@@ -2462,6 +3625,7 @@ export function App({ api = gameApi }: { api?: GameApi }) {
           onTutorial={() => setView("tutorial")}
           onResume={() => void resumeLastGame()}
           canResume={Boolean(resumeGameId)}
+          networkMode={network?.mode}
         />
       )}
       {view === "tutorial" && (
@@ -2479,8 +3643,16 @@ export function App({ api = gameApi }: { api?: GameApi }) {
           onRefreshModels={() => void inspectAiModels()}
           onSeedMode={setSeedMode}
           onCustomSeed={setCustomSeed}
-          onStart={(options) => void startGame(options)}
+          onStart={(options) =>
+            void (options.matchType === "lan-human"
+              ? startLanGame(options)
+              : startGame(options))
+          }
           onHome={goHome}
+          onJoin={(code) => void joinLanGame(code)}
+          network={network}
+          onToggleLan={(enabled) => void handleToggleLan(enabled)}
+          joinPrefill={joinPrefill}
         />
       )}
       {view === "game" && game && (
@@ -2495,6 +3667,12 @@ export function App({ api = gameApi }: { api?: GameApi }) {
           agentActionBusy={agentActionBusy}
           movesError={movesError}
           resignArmed={resignArmed}
+          seat={seat}
+          seatColor={seatColor}
+          network={network}
+          onReinvite={() => void handleReinvite()}
+          onResolveUndo={(accept) => void handleResolveUndo(accept)}
+          onRejoin={() => clearCurrentGame("mode", { clearSeat: true })}
           onSquare={(position) => void handleSquare(position)}
           onUndo={() => void handleUndo()}
           onResign={() => void handleResign()}

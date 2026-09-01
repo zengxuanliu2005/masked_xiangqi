@@ -73,12 +73,15 @@ const assertActiveRevision = (
   game: GameState,
   expectedRevision: number,
 ): void => {
+  // Revision is the optimistic-concurrency boundary. Check it first so every
+  // delayed same-revision write gets the stable STALE_REVISION contract even
+  // when the winning request also ended the game.
+  assertRevision(game, expectedRevision);
   if (game.status.phase !== "active") {
     throw new GameRuleError("GAME_FINISHED", "对局已经结束，不能继续操作。", {
       status: game.status,
     });
   }
-  assertRevision(game, expectedRevision);
 };
 
 const cloneCapturedPiece = (
@@ -126,7 +129,10 @@ const createUndoSnapshot = (game: GameState): UndoSnapshot => ({
 
 const undoTargetIndex = (game: GameState): number => {
   if (!game.allowUndo || game.status.reason === "resignation") return -1;
-  if (game.matchType === "human-human") return game.undoStack.length - 1;
+  // Human-AI is the special case: it rewinds past the model's reply to the
+  // human's own last turn. Every other match type takes back a single ply, so
+  // test for the exception rather than enumerating the normal modes.
+  if (game.matchType !== "human-ai") return game.undoStack.length - 1;
 
   for (let index = game.undoStack.length - 1; index >= 0; index -= 1) {
     if (game.undoStack[index].turn === game.player1Side) return index;
@@ -260,11 +266,20 @@ export function applyMove(game: GameState, command: MoveCommand): GameState {
   return game;
 }
 
-export function resign(game: GameState, expectedRevision: number): GameState {
+/**
+ * `loser` defaults to the side on turn, which is what same-screen and human-AI
+ * games mean by "resign". LAN seats pass their own colour so a player can
+ * concede on the opponent's turn too.
+ */
+export function resign(
+  game: GameState,
+  expectedRevision: number,
+  loser: Color = game.turn,
+): GameState {
   assertActiveRevision(game, expectedRevision);
   game.status = {
     phase: "finished",
-    winner: oppositeColor(game.turn),
+    winner: oppositeColor(loser),
     reason: "resignation",
   };
   game.revision += 1;

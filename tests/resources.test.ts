@@ -67,6 +67,28 @@ describe("GameStore 生命周期与容量", () => {
     store.clear();
     expect(store.size).toBe(0);
   });
+
+  it("has 会先回收过期对局，但不会把容量扫描当成访问", () => {
+    let now = new Date("2026-08-31T00:00:00.000Z");
+    const store = new GameStore({
+      maxGames: 1,
+      activeIdleMs: 1_000,
+      now: () => now,
+    });
+    const game = store.create(createOptions);
+    const originalAccess = game.lastAccessedAt;
+
+    now = new Date("2026-08-31T00:00:00.750Z");
+    expect(store.has(game.id)).toBe(true);
+    expect(game.lastAccessedAt).toBe(originalAccess);
+    expect(store.existing([game.id, "missing"])).toEqual(new Set([game.id]));
+    expect(game.lastAccessedAt).toBe(originalAccess);
+
+    now = new Date("2026-08-31T00:00:01.001Z");
+    expect(store.has(game.id)).toBe(false);
+    expect(store.size).toBe(0);
+    expect(() => store.create(createOptions)).not.toThrow();
+  });
 });
 
 describe("Agent JSONL 日志生命周期", () => {

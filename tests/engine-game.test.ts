@@ -403,6 +403,27 @@ describe("吃主帅模式与认输", () => {
       reason: "resignation",
     });
   });
+
+  it("可以指定认输方，让局域网座位在对手回合也能认输", () => {
+    const game = createScenario({
+      mode: "standard",
+      matchType: "lan-human",
+      turn: "black",
+      pieces: [
+        testPiece("red-general", "red", "general", 4, 9),
+        testPiece("black-general", "black", "general", 4, 0),
+        testPiece("blocker", "red", "pawn", 4, 5),
+      ],
+    });
+
+    // 轮到黑方，但认输的是红方座位。
+    resign(game, 0, "red");
+    expect(game.status).toEqual({
+      phase: "finished",
+      winner: "black",
+      reason: "resignation",
+    });
+  });
 });
 
 describe("悔棋", () => {
@@ -445,6 +466,40 @@ describe("悔棋", () => {
       revealed: false,
     });
     expect(toPublicGame(game).canUndo).toBe(false);
+  });
+
+  it("局域网对战与同屏一样只撤回一步，不套用人机的整轮规则", () => {
+    const game = createScenario({
+      mode: "capture-general",
+      matchType: "lan-human",
+      player1Side: "red",
+      turn: "red",
+      pieces: [
+        testPiece("red-rook", "red", "rook", 0, 9),
+        testPiece("black-rook", "black", "rook", 8, 0),
+      ],
+    });
+    applyMove(game, {
+      from: { x: 0, y: 9 },
+      to: { x: 0, y: 8 },
+      expectedRevision: 0,
+    });
+    applyMove(game, {
+      from: { x: 8, y: 0 },
+      to: { x: 8, y: 1 },
+      expectedRevision: 1,
+    });
+
+    undo(game, 2);
+    // 只回退黑方那一步：轮次回到黑方，红车留在已走过的位置。
+    expect(game.moveNumber).toBe(1);
+    expect(game.turn).toBe("black");
+    expect(
+      game.pieces.find((piece) => piece.id === "red-rook")?.position,
+    ).toEqual({ x: 0, y: 8 });
+    expect(
+      game.pieces.find((piece) => piece.id === "black-rook")?.position,
+    ).toEqual({ x: 8, y: 0 });
   });
 
   it("人机对战一次悔棋回到玩家上一轮落子前", () => {
