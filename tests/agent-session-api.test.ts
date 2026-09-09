@@ -73,6 +73,7 @@ describe("Agent Session API", () => {
       .send({
         matchType: "human-ai",
         aiModel: "test-model",
+        aiDifficulty: "medium",
         player1Side,
       })
       .expect(201);

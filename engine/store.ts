@@ -1,4 +1,9 @@
-import type { GameMode, Color, MatchType } from "../shared/contracts";
+import type {
+  AiDifficulty,
+  GameMode,
+  Color,
+  MatchType,
+} from "../shared/contracts";
 import { createGame } from "./setup";
 import type { GameState } from "./types";
 
@@ -58,6 +63,7 @@ export class GameStore {
     player1Side: Color;
     matchType: MatchType;
     aiModel?: string | null;
+    aiDifficulty?: AiDifficulty | null;
     seed?: string;
     allowDraw?: boolean;
     allowUndo?: boolean;

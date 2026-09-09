@@ -1,8 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { PublicGameState } from "../shared/contracts";
+import { clearStrategyCache } from "../server/ai/strategy";
 import {
   buildChatRequest,
+  buildPrompt,
   chooseMoveWithRetry,
+  DIFFICULTY_PROFILES,
   describeAiAvailability,
   MAX_MODEL_OUTPUT_BYTES,
   OllamaClient,
@@ -22,6 +36,7 @@ const publicGame: PublicGameState = {
   canUndo: false,
   matchType: "human-ai",
   aiModel: "local-model",
+  aiDifficulty: "medium",
   revision: 0,
   turn: "red",
   moveNumber: 0,
@@ -51,6 +66,11 @@ const legalMoves = [
   },
 ];
 
+const strategyOverrideRoot = mkdtempSync(
+  path.join(tmpdir(), "mx-ollama-strategies-"),
+);
+const originalStrategyRoot = process.env.MASKED_XIANGQI_STRATEGY_DIR;
+
 const jsonResponse = (payload: unknown, status = 200) =>
   new Response(JSON.stringify(payload), {
     status,
@@ -66,9 +86,24 @@ const streamResponse = (...payloads: unknown[]) =>
     },
   );
 
+beforeEach(() => {
+  process.env.MASKED_XIANGQI_STRATEGY_DIR = strategyOverrideRoot;
+  clearStrategyCache();
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  clearStrategyCache();
+  if (originalStrategyRoot === undefined) {
+    delete process.env.MASKED_XIANGQI_STRATEGY_DIR;
+  } else {
+    process.env.MASKED_XIANGQI_STRATEGY_DIR = originalStrategyRoot;
+  }
+});
+
+afterAll(() => {
+  rmSync(strategyOverrideRoot, { recursive: true, force: true });
 });
 
 describe("Ollama 适配器", () => {
@@ -356,9 +391,12 @@ describe("Ollama 适配器", () => {
       { game: publicGame, legalMoves, model: "qwen3-vl:4b" },
       { capabilities: ["thinking"], supportsThinking: true, isGptOss: false },
     );
+    // The quirk is only about where the answer lands, so it suppresses the
+    // reasoning pass and nothing else: the tier's budget and strategy text
+    // still apply, or picking a difficulty would be inert on these models.
     expect(request.think).toBe(false);
-    expect(request.options.num_predict).toBe(64);
-    expect(request.messages[0].content).toContain("立即返回");
+    expect(request.options.num_predict).toBe(128);
+    expect(request.messages[0].content).not.toContain("立即返回");
   });
 
   it("content 为空时兼容 Qwen-VL 放在 thinking 中的严格 JSON 决定", async () => {
@@ -460,5 +498,238 @@ describe("Ollama 适配器", () => {
     expect(chooseMove.mock.calls[1][1]).toMatchObject({
       correction: "编号越界",
     });
+  });
+});
+
+describe("人机难度", () => {
+  const capabilities = {
+    capabilities: ["completion", "thinking"],
+    supportsThinking: true,
+    isGptOss: false,
+  };
+  const at = (difficulty: PublicGameState["aiDifficulty"]) => ({
+    ...publicGame,
+    aiDifficulty: difficulty,
+  });
+
+  it("每一档的首次与纠错预算合计不超过 60 秒", () => {
+    for (const [tier, profile] of Object.entries(DIFFICULTY_PROFILES)) {
+      expect(
+        profile.decisionTimeoutMs + profile.correctionTimeoutMs,
+        `${tier} 超出 60 秒预算`,
+      ).toBeLessThanOrEqual(60_000);
+    }
+  });
+
+  it("三档给出不同的输出预算与思考强度", () => {
+    const easy = buildChatRequest(
+      { game: at("easy"), legalMoves, model: "local-model" },
+      capabilities,
+    );
+    const medium = buildChatRequest(
+      { game: at("medium"), legalMoves, model: "local-model" },
+      capabilities,
+    );
+    const hard = buildChatRequest(
+      { game: at("hard"), legalMoves, model: "local-model" },
+      capabilities,
+    );
+
+    expect(easy.options.num_predict).toBe(64);
+    expect(medium.options.num_predict).toBe(128);
+    expect(hard.options.num_predict).toBe(256);
+    // Easy deliberately skips the reasoning pass even on a thinking model.
+    expect(easy.think).toBe(false);
+    expect(medium.think).toBe(true);
+    expect(hard.think).toBe(true);
+    for (const request of [easy, medium, hard]) {
+      expect(request.options.temperature).toBe(0);
+    }
+  });
+
+  it("策略文本作为第二条 system 消息注入，且不挤掉既有的首尾消息", () => {
+    const request = buildChatRequest(
+      { game: at("hard"), legalMoves, model: "local-model" },
+      capabilities,
+    );
+    expect(request.messages[0].role).toBe("system");
+    expect(request.messages[0].content).toContain("盲棋");
+    expect(request.messages[1].role).toBe("system");
+    expect(request.messages[1].content).toContain("困难");
+    expect(request.messages.at(-1)?.role).toBe("user");
+
+    const corrected = buildChatRequest(
+      { game: at("hard"), legalMoves, model: "local-model" },
+      capabilities,
+      "moveIndex 超出范围",
+    );
+    // A correction retry is about schema-valid output, not better play.
+    expect(corrected.messages.some((m) => m.content.includes("困难"))).toBe(
+      false,
+    );
+    expect(corrected.messages.at(-1)?.content).toContain("跳过分析");
+  });
+
+  it("只有困难档给候选加公开信息标注", () => {
+    const capturing = [
+      { ...legalMoves[0], to: { x: 0, y: 5 }, captures: true },
+    ];
+    const board = [
+      ...publicGame.board,
+      {
+        id: "target",
+        position: { x: 0, y: 5 },
+        faceUp: false,
+        publicIdentity: { color: "black" as const, type: "rook" as const },
+        controller: "black" as const,
+      },
+    ];
+    const hard = buildPrompt({
+      game: { ...at("hard"), board },
+      legalMoves: capturing,
+      model: "local-model",
+    });
+    const medium = buildPrompt({
+      game: { ...at("medium"), board },
+      legalMoves: capturing,
+      model: "local-model",
+    });
+
+    // The target is covered, so the annotation uses its public identity only.
+    expect(hard).toContain("capturesPiece");
+    expect(hard).toContain("车");
+    expect(hard).toContain('"capturesValue":9');
+    expect(hard).toContain('"reveals":true');
+    expect(medium).not.toContain("capturesPiece");
+    expect(medium).not.toContain("reveals");
+  });
+
+  it("标注按公开身份取值：盖着的子用位置身份，翻开的子用真实棋种", () => {
+    // Both pieces below sit on a square whose printed identity is a pawn.
+    // The covered one must annotate as a pawn even though its true type is
+    // unknowable here; the revealed one annotates as what it turned out to be.
+    const board = [
+      ...publicGame.board,
+      {
+        id: "covered-target",
+        position: { x: 4, y: 4 },
+        faceUp: false,
+        publicIdentity: { color: "black" as const, type: "pawn" as const },
+        controller: "black" as const,
+      },
+      {
+        id: "revealed-target",
+        position: { x: 5, y: 4 },
+        faceUp: true,
+        publicIdentity: { color: "black" as const, type: "pawn" as const },
+        identity: { color: "black" as const, type: "cannon" as const },
+        controller: "black" as const,
+      },
+    ];
+    const prompt = buildPrompt({
+      game: { ...at("hard"), board },
+      legalMoves: [
+        {
+          pieceId: "covered",
+          from: { x: 0, y: 6 },
+          to: { x: 4, y: 4 },
+          captures: true,
+        },
+        {
+          pieceId: "covered",
+          from: { x: 0, y: 6 },
+          to: { x: 5, y: 4 },
+          captures: true,
+        },
+      ],
+      model: "local-model",
+    });
+
+    expect(prompt).toContain('"capturesPiece":"兵卒","capturesValue":1');
+    expect(prompt).toContain('"capturesPiece":"炮","capturesValue":4.5');
+  });
+
+  it("吃掉主帅是压倒性的高价值，不会被标成最差候选", () => {
+    // Capturing a general ends the game in both modes. A zero value would put
+    // the winning move at the bottom of the list the model is told to weigh.
+    const board = [
+      ...publicGame.board,
+      {
+        id: "enemy-general",
+        position: { x: 4, y: 0 },
+        faceUp: true,
+        publicIdentity: { color: "black" as const, type: "general" as const },
+        identity: { color: "black" as const, type: "general" as const },
+        controller: "black" as const,
+      },
+      {
+        id: "enemy-rook",
+        position: { x: 3, y: 0 },
+        faceUp: true,
+        publicIdentity: { color: "black" as const, type: "rook" as const },
+        identity: { color: "black" as const, type: "rook" as const },
+        controller: "black" as const,
+      },
+    ];
+    const prompt = buildPrompt({
+      game: { ...at("hard"), mode: "capture-general", board },
+      legalMoves: [
+        {
+          pieceId: "covered",
+          from: { x: 0, y: 6 },
+          to: { x: 3, y: 0 },
+          captures: true,
+        },
+        {
+          pieceId: "covered",
+          from: { x: 0, y: 6 },
+          to: { x: 4, y: 0 },
+          captures: true,
+        },
+      ],
+      model: "local-model",
+    });
+
+    const values = [...prompt.matchAll(/"capturesValue":(\d+)/g)].map((match) =>
+      Number(match[1]),
+    );
+    expect(values).toHaveLength(2);
+    // The general capture must be the highest-valued candidate, not the lowest.
+    expect(Math.max(...values)).toBe(1000);
+    expect(values[1]).toBe(1000);
+  });
+
+  it("qwen3-vl 只跳过推理，仍保留本档的策略文本与输出预算", () => {
+    // The quirk is about where the model puts its answer, not about strength.
+    const request = buildChatRequest(
+      { game: at("hard"), legalMoves, model: "qwen3-vl:4b" },
+      capabilities,
+    );
+    expect(request.think).toBe(false);
+    expect(request.options.num_predict).toBe(256);
+    expect(request.messages.some((m) => m.content.includes("困难"))).toBe(true);
+  });
+
+  it("简单档在 gpt-oss 上也真的关闭思考", () => {
+    const request = buildChatRequest(
+      { game: at("easy"), legalMoves, model: "gpt-oss:20b" },
+      { ...capabilities, isGptOss: true },
+    );
+    // gpt-oss has no boolean form, so "low" is as off as it gets — but it must
+    // not silently stay at the default "medium" effort.
+    expect(request.think).toBe("low");
+  });
+
+  it("注入策略文本后仍不泄漏暗子身份", () => {
+    for (const tier of ["easy", "medium", "hard"] as const) {
+      const request = buildChatRequest(
+        { game: at(tier), legalMoves, model: "local-model" },
+        capabilities,
+      );
+      const serialized = JSON.stringify(request.messages);
+      expect(serialized).not.toContain("trueIdentity");
+      expect(serialized).not.toContain('"identity"');
+      expect(serialized).toContain("movesAs");
+    }
   });
 });

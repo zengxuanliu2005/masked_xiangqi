@@ -4,6 +4,14 @@ export const BOARD_HEIGHT = 10;
 export type Color = "red" | "black";
 export type GameMode = "standard" | "capture-general";
 export type MatchType = "human-human" | "human-ai" | "lan-human";
+/** Strength tier for a `human-ai` game; drives the prompt sent to Ollama. */
+export type AiDifficulty = "easy" | "medium" | "hard";
+export const AI_DIFFICULTIES: readonly AiDifficulty[] = [
+  "easy",
+  "medium",
+  "hard",
+];
+export const DEFAULT_AI_DIFFICULTY: AiDifficulty = "medium";
 export type PieceType =
   "general" | "advisor" | "elephant" | "horse" | "rook" | "cannon" | "pawn";
 
@@ -103,6 +111,8 @@ export interface PublicGameState {
   canUndo: boolean;
   matchType: MatchType;
   aiModel: string | null;
+  /** Null for every match type other than `human-ai`. */
+  aiDifficulty: AiDifficulty | null;
   revision: number;
   turn: Color;
   moveNumber: number;
@@ -149,6 +159,8 @@ export interface CreateGameRequest {
   /** Omit to let the server assign Player 1 / the human side at random. */
   player1Side?: Color;
   aiModel?: string;
+  /** Defaults to `medium`; ignored unless `matchType` is `human-ai`. */
+  aiDifficulty?: AiDifficulty;
   /** Omit for an automatically generated opening; otherwise replay this seed. */
   seed?: string;
 }
@@ -272,6 +284,18 @@ export const COLOR_LABELS: Record<Color, string> = {
 export const MODE_LABELS: Record<GameMode, string> = {
   standard: "标准模式",
   "capture-general": "吃主帅模式",
+};
+
+export const DIFFICULTY_LABELS: Record<AiDifficulty, string> = {
+  easy: "简单",
+  medium: "中等",
+  hard: "困难",
+};
+
+export const DIFFICULTY_HINTS: Record<AiDifficulty, string> = {
+  easy: "只顾眼前，容易漏算",
+  medium: "稳健应对，均衡节奏",
+  hard: "会算子力得失，思考更久",
 };
 
 export const MATCH_LABELS: Record<MatchType, string> = {

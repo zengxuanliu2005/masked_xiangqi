@@ -1,4 +1,5 @@
 import type {
+  AiDifficulty,
   Color,
   GameMode,
   GameStatus,
@@ -42,6 +43,7 @@ export interface GameState {
   allowUndo: boolean;
   matchType: MatchType;
   aiModel: string | null;
+  aiDifficulty: AiDifficulty | null;
   player1Side: Color;
   turn: Color;
   revision: number;
@@ -66,6 +68,7 @@ export interface NewGameOptions {
   allowUndo?: boolean;
   matchType?: MatchType;
   aiModel?: string | null;
+  aiDifficulty?: AiDifficulty | null;
   rng?: () => number;
   id?: string;
 }
@@ -78,6 +81,7 @@ export interface ScenarioOptions {
   allowUndo?: boolean;
   matchType?: MatchType;
   aiModel?: string | null;
+  aiDifficulty?: AiDifficulty | null;
   turn?: Color;
   player1Side?: Color;
   id?: string;

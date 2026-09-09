@@ -206,6 +206,48 @@ describe("REST API", () => {
     ).toBe(true);
   });
 
+  it("人机建局记录难度，缺省为中等，并拒绝未知档位", async () => {
+    const byDefault = await apiRequest()
+      .post("/api/v1/games")
+      .send({ matchType: "human-ai", aiModel: "test-model:latest" })
+      .expect(201);
+    expect(byDefault.body.aiDifficulty).toBe("medium");
+
+    const hard = await apiRequest()
+      .post("/api/v1/games")
+      .send({
+        matchType: "human-ai",
+        aiModel: "test-model:latest",
+        aiDifficulty: "hard",
+      })
+      .expect(201);
+    expect(hard.body.aiDifficulty).toBe("hard");
+    // The tier has to survive a read, or the Runner would never see it.
+    const reread = await apiRequest()
+      .get(`/api/v1/games/${hard.body.id}`)
+      .expect(200);
+    expect(reread.body.aiDifficulty).toBe("hard");
+
+    const unknown = await apiRequest()
+      .post("/api/v1/games")
+      .send({
+        matchType: "human-ai",
+        aiModel: "test-model:latest",
+        aiDifficulty: "impossible",
+      })
+      .expect(400);
+    expect(unknown.body.error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("非人机对局不带难度", async () => {
+    const created = await apiRequest()
+      .post("/api/v1/games")
+      .send({ matchType: "human-human", aiDifficulty: "hard" })
+      .expect(201);
+    expect(created.body.aiDifficulty).toBeNull();
+    expect(created.body.aiModel).toBeNull();
+  });
+
   it("人机建局重新验证模型存在且明确拒绝 embedding-only 模型", async () => {
     vi.mocked(aiProvider.listModels).mockResolvedValueOnce([]);
     expect(
@@ -501,5 +543,46 @@ describe("REST API", () => {
       })
       .expect(400);
     expect(invalid.body.error.code).toBe("INVALID_REQUEST");
+  });
+
+  // The dev server mounts Vite here to keep the page and the API on one
+  // origin. The frontend must sit behind the API routes and behind the /api
+  // 404, or an unknown endpoint would answer with the SPA shell instead of a
+  // structured error.
+  it("前端中间件挂载在 API 路由与 /api 兜底之后", async () => {
+    const frontendMiddleware = vi.fn((_request, response) => {
+      response.type("html").send("<!doctype html><title>spa</title>");
+    });
+    const frontendApp = createApp({
+      store,
+      aiProvider,
+      random: () => 0.75,
+      frontendMiddleware,
+    });
+    const frontendServer = createServer(frontendApp);
+    await new Promise<void>((resolve, reject) => {
+      frontendServer.once("error", reject);
+      frontendServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    try {
+      const health = await request(frontendServer)
+        .get("/api/v1/health")
+        .expect(200);
+      expect(health.body.ok).toBe(true);
+
+      const unknownApi = await request(frontendServer)
+        .get("/api/v1/does-not-exist")
+        .expect(404);
+      expect(unknownApi.body.error.code).toBe("ENDPOINT_NOT_FOUND");
+      expect(frontendMiddleware).not.toHaveBeenCalled();
+
+      const page = await request(frontendServer).get("/some/route").expect(200);
+      expect(page.text).toContain("spa");
+      expect(frontendMiddleware).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) =>
+        frontendServer.close(() => resolve()),
+      );
+    }
   });
 });

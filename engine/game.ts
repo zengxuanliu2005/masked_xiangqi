@@ -360,6 +360,7 @@ export function toPublicGame(game: GameState): PublicGameState {
     canUndo: canUndo(game),
     matchType: game.matchType,
     aiModel: game.aiModel,
+    aiDifficulty: game.aiDifficulty,
     revision: game.revision,
     turn: game.turn,
     moveNumber: game.moveNumber,

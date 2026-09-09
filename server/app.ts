@@ -5,6 +5,7 @@ import express, {
   type ErrorRequestHandler,
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from "express";
 import { z } from "zod";
@@ -20,6 +21,8 @@ import {
 import { GameStore, GameStoreCapacityError } from "../engine/store";
 import type { GameState } from "../engine/types";
 import {
+  AI_DIFFICULTIES,
+  DEFAULT_AI_DIFFICULTY,
   oppositeColor,
   type Color,
   type LanViewerSeatState,
@@ -50,6 +53,7 @@ import type { NetworkStatus } from "./network";
 const colorSchema = z.enum(["red", "black"]);
 const modeSchema = z.enum(["standard", "capture-general"]);
 const matchTypeSchema = z.enum(["human-human", "human-ai"]);
+const difficultySchema = z.enum(AI_DIFFICULTIES);
 const positionSchema = z
   .object({
     x: z.number().int().min(0).max(8),
@@ -64,6 +68,7 @@ const createGameSchema = z
     matchType: matchTypeSchema.default("human-human"),
     player1Side: colorSchema.optional(),
     aiModel: z.string().trim().min(1).max(200).optional(),
+    aiDifficulty: difficultySchema.default(DEFAULT_AI_DIFFICULTY),
     seed: z.string().trim().min(1).max(80).optional(),
   })
   .strict()
@@ -209,6 +214,16 @@ const validate = <T extends z.ZodType>(
 export interface AppOptions {
   store?: GameStore;
   serveFrontend?: boolean;
+  /**
+   * Dev only: Vite's middlewares, mounted exactly where `dist/` would be
+   * served. Serving the SPA from this listener keeps the browser origin and
+   * the request Host identical, so a dev LAN session passes the same gate as
+   * production instead of needing a cross-port exception. Never proxy `/api`
+   * through a separate Vite server: a proxy makes every remote guest look like
+   * a loopback socket peer, which would open `agent-session` and the other
+   * LOOPBACK_ONLY endpoints to the LAN.
+   */
+  frontendMiddleware?: RequestHandler;
   aiProvider?: AiProvider;
   agentSessionManager?: AgentSessionManager;
   lanRoomManager?: LanRoomManager;
@@ -445,6 +460,7 @@ export function createApp(options: AppOptions = {}) {
       matchType: body.matchType,
       player1Side,
       aiModel: body.matchType === "human-ai" ? body.aiModel : null,
+      aiDifficulty: body.matchType === "human-ai" ? body.aiDifficulty : null,
       seed: body.seed,
     });
     response.status(201).json(toPublicGame(game));
@@ -549,6 +565,7 @@ export function createApp(options: AppOptions = {}) {
       // The host is always player1; the guest takes the other colour.
       player1Side: hostSide,
       aiModel: null,
+      aiDifficulty: null,
       seed: body.seed,
     });
     const seat = lanRooms.create(game.id, hostSide);
@@ -981,7 +998,9 @@ export function createApp(options: AppOptions = {}) {
     });
   });
 
-  if (options.serveFrontend) {
+  if (options.frontendMiddleware) {
+    app.use(options.frontendMiddleware);
+  } else if (options.serveFrontend) {
     const distDirectory = path.resolve(process.cwd(), "dist");
     if (existsSync(distDirectory)) {
       app.use(express.static(distDirectory));

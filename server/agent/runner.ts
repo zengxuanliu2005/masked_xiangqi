@@ -7,6 +7,7 @@ import {
   chooseMoveWithRetry,
   isGptOssModel,
   sanitizeModelText,
+  thinkingOptionForRequest,
   type AiDecision,
   type AiProvider,
   type ModelCapabilities,
@@ -391,7 +392,13 @@ export class AgentRunner {
             "[thinking] 模型未声明 thinking 能力；仅显示候选、结论和 API 日志。",
           );
         } else if (capabilities.isGptOss) {
-          this.reporter.line("[thinking] GPT-OSS 使用 medium 级别。 ");
+          const effort = thinkingOptionForRequest(
+            { game, model: game.aiModel },
+            capabilities,
+          );
+          if (effort === "low" || effort === "medium") {
+            this.reporter.line(`[thinking] GPT-OSS 使用 ${effort} 级别。 `);
+          }
         }
         await this.setStatus("thinking");
         const turnStartedAt = this.now().getTime();

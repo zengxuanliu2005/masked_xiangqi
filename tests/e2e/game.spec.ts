@@ -20,6 +20,7 @@ const fixtureGame = (
   canUndo: false,
   matchType: "human-human",
   aiModel: null,
+  aiDifficulty: null,
   revision: 0,
   turn: "red",
   moveNumber: 0,
@@ -177,6 +178,54 @@ test("首页、设置、键盘棋盘与结算流程可访问", async ({ page }) 
   await result.getByRole("button", { name: "同 Seed 再来" }).click();
   await expect(result).toBeHidden();
   await expect(page.getByText("进行中保密 · 终局后公开")).toBeVisible();
+});
+
+test("人机设置的胜负规则与难度始终分占独立网格行", async ({
+  page,
+  browserName,
+}) => {
+  test.skip(browserName !== "chromium", "设置布局矩阵固定在 Chromium");
+  await page.route("**/api/v1/ai/models", (route) =>
+    route.fulfill({
+      json: {
+        provider: "ollama",
+        available: true,
+        models: [
+          {
+            name: "layout-fixture",
+            capabilities: ["completion"],
+            supportsThinking: false,
+            supportsCompletion: true,
+          },
+        ],
+        message: "布局测试模型已就绪。",
+      },
+    }),
+  );
+
+  for (const [width, height] of [
+    [1024, 768],
+    [390, 844],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.goto("/");
+    await page.getByRole("button", { name: /开始游戏/ }).click();
+    await page.getByRole("button", { name: /选择人机对战/ }).click();
+
+    const rules = page.getByRole("region", { name: "胜负规则" });
+    const difficulty = page.getByRole("region", { name: "对手难度" });
+    const [rulesBox, difficultyBox] = await Promise.all([
+      rules.boundingBox(),
+      difficulty.boundingBox(),
+    ]);
+
+    expect(rulesBox, `${width}×${height} 胜负规则区域`).not.toBeNull();
+    expect(difficultyBox, `${width}×${height} 难度区域`).not.toBeNull();
+    expect(
+      difficultyBox!.y,
+      `${width}×${height} 两个区域不得重叠`,
+    ).toBeGreaterThanOrEqual(rulesBox!.y + rulesBox!.height - 1);
+  }
 });
 
 test("新手教学可亲手完成选中、合法落点与揭面", async ({ page }) => {
@@ -405,6 +454,7 @@ test("控制器八种状态按轮询更新且活动局离开会停止 Runner", a
     id: "controller-fixture",
     matchType: "human-ai",
     aiModel: "local-model",
+    aiDifficulty: "medium",
     players: { player1: "red", player2: "black" },
   });
   await installGameRoutes(page, game, () =>
@@ -460,6 +510,7 @@ test("终端失败显示恢复操作，复制拒绝、重启与停止均可恢�
     id: "paused-controller",
     matchType: "human-ai",
     aiModel: "local-model",
+    aiDifficulty: "medium",
   });
   let current = sessionFixture(game.id, "paused", {
     terminal: null,

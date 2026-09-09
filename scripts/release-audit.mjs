@@ -27,7 +27,7 @@ if (insideGit.status === 0) {
   });
   const names = staged.stdout.split("\0").filter(Boolean);
   const forbidden = names.filter((name) =>
-    /^(?:\.local\/|node_modules\/|dist\/|coverage\/|output\/|\.playwright-cli\/)|(?:^|\/)\.env(?:\.|$)|\.log$/i.test(
+    /^(?:\.local\/|node_modules\/|dist\/|coverage\/|output\/|\.playwright-cli\/)|^(?:CLAUDE|AGENTS)\.md$|^\.claude\/settings\.local\.json$|(?:^|\/)\.env(?:\.|$)|\.log$/i.test(
       name,
     ),
   );

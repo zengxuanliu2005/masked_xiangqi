@@ -3,13 +3,14 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // `npm run dev` does not start a standalone Vite server: server/index.ts
+  // loads Vite in middleware mode and mounts it on the Express listener, so
+  // the page and the API always share one origin. These entries only apply to
+  // a bare `vite` / `vite preview` invocation.
   server: {
     host: "127.0.0.1",
     port: 5173,
     strictPort: true,
-    proxy: {
-      "/api": "http://127.0.0.1:3001",
-    },
   },
   preview: {
     host: "127.0.0.1",

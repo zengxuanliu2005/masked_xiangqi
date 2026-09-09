@@ -157,8 +157,10 @@ export const isAllowedRequestHost = (
  * on the Wi-Fi (`http://192.168.1.99:8080`), handing it full cross-origin
  * access to the API from the visitor's browser. The app's own pages always
  * carry an Origin equal to the Host they are talking to, so this costs nothing
- * legitimate. Different loopback ports remain allowed for the Vite dev proxy,
- * but only when the request Host is itself loopback.
+ * legitimate. Different loopback ports remain allowed for local dev tooling
+ * (`vite`, `vite preview`), but only when the request Host is itself loopback.
+ * `npm run dev` no longer needs that exception — it serves the page from this
+ * same listener — so nothing in the shipped flow depends on it.
  */
 export const isAllowedOrigin = (
   origin: string,
@@ -183,8 +185,10 @@ export const isAllowedOrigin = (
     ) {
       return false;
     }
-    // LAN mode is production-only and has no Vite cross-port exception. Use
-    // URL parsing so default ports (`:80` / `:443`) compare canonically.
+    // LAN mode has no Vite cross-port exception, in dev or in production: dev
+    // serves the page from this very listener, so a LAN page and its API are
+    // always the same origin. Use URL parsing so default ports (`:80` /
+    // `:443`) compare canonically.
     const requestUrl = new URL(`${url.protocol}//${requestHost}`);
     return url.host.toLowerCase() === requestUrl.host.toLowerCase();
   } catch {

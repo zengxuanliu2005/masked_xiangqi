@@ -454,6 +454,7 @@ describe("网络模式端点与本机专属限制", () => {
       matchType: "human-human",
       player1Side: "red",
       aiModel: null,
+      aiDifficulty: null,
       seed: "remote-write-boundary",
     });
     const api = await serve("lan", "192.168.1.20", store);

@@ -104,6 +104,7 @@ describe("随机布子与公开局面", () => {
       mode: "capture-general",
       matchType: "human-ai",
       aiModel: "local-model",
+      aiDifficulty: "medium",
       player1Side: "black",
       seed: "跨平台-Opening-01",
       id: "seed-ai",

@@ -35,6 +35,7 @@ const gameState = (
   canUndo: false,
   matchType: "human-ai",
   aiModel: "local-model",
+  aiDifficulty: "medium",
   revision: 0,
   turn: "red",
   moveNumber: 0,
@@ -181,6 +182,47 @@ describe("独立 Agent Runner", () => {
     ).toBe(true);
     expect(JSON.stringify(execution.logger.records)).not.toContain(
       "trueIdentity",
+    );
+  });
+
+  it("难度随公开局面传给模型，不经过会话文件", async () => {
+    // The Runner is a separate process whose only view of opponent config is
+    // the polled PublicGameState — the same reason aiModel lives there.
+    const { api } = fakeApi({ game: gameState({ aiDifficulty: "hard" }) });
+    const chooseMove = vi.fn<AiProvider["chooseMove"]>(async () => ({
+      moveIndex: 0,
+      source: "model" as const,
+      note: "测试选择",
+      content: '{"moveIndex":0,"reason":"测试选择"}',
+    }));
+    await run(api, provider(chooseMove));
+
+    expect(chooseMove).toHaveBeenCalledTimes(1);
+    expect(chooseMove.mock.calls[0]?.[0].game.aiDifficulty).toBe("hard");
+  });
+
+  it("简单档 GPT-OSS 终端提示与实际 low 思考级别一致", async () => {
+    const { api } = fakeApi({
+      game: gameState({
+        aiModel: "gpt-oss:20b",
+        aiDifficulty: "easy",
+      }),
+    });
+    const aiProvider = provider();
+    aiProvider.getModelCapabilities = vi.fn(async () => ({
+      capabilities: ["completion", "thinking"],
+      supportsThinking: true,
+      supportsCompletion: true,
+      isGptOss: true,
+    }));
+
+    const execution = await run(api, aiProvider);
+
+    expect(execution.reporter.output).toContain(
+      "[thinking] GPT-OSS 使用 low 级别。",
+    );
+    expect(execution.reporter.output).not.toContain(
+      "[thinking] GPT-OSS 使用 medium 级别。",
     );
   });
 

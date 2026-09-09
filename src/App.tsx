@@ -8,11 +8,16 @@ import {
   type RefObject,
 } from "react";
 import {
+  AI_DIFFICULTIES,
   COLOR_LABELS,
+  DEFAULT_AI_DIFFICULTY,
+  DIFFICULTY_HINTS,
+  DIFFICULTY_LABELS,
   MATCH_LABELS,
   MODE_LABELS,
   PIECE_LABELS,
   type AgentSessionState,
+  type AiDifficulty,
   type AiModelsResponse,
   type Color,
   type CreateGameRequest,
@@ -67,6 +72,7 @@ interface GameLaunchOptions {
   allowUndo: boolean;
   seed?: string;
   model?: string;
+  difficulty?: AiDifficulty;
 }
 
 const FILE_NAMES = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
@@ -270,9 +276,11 @@ const playerFor = (
   if (game.players.player1 === color) {
     return game.matchType === "human-ai" ? "你" : "Player 1";
   }
-  return game.matchType === "human-ai"
-    ? (game.aiModel ?? "本机模型")
-    : "Player 2";
+  if (game.matchType !== "human-ai") return "Player 2";
+  const model = game.aiModel ?? "本机模型";
+  return game.aiDifficulty
+    ? `${model} · ${DIFFICULTY_LABELS[game.aiDifficulty]}`
+    : model;
 };
 
 function SiteHeader({
@@ -411,11 +419,13 @@ function GameSetupDialog({
   gameMode,
   allowDraw,
   allowUndo,
+  difficulty,
   onSeedMode,
   onCustomSeed,
   onGameMode,
   onAllowDraw,
   onAllowUndo,
+  onDifficulty,
   onCancel,
   onConfirm,
   returnFocusRef,
@@ -427,11 +437,13 @@ function GameSetupDialog({
   gameMode: GameMode;
   allowDraw: boolean;
   allowUndo: boolean;
+  difficulty: AiDifficulty;
   onSeedMode: (mode: SeedMode) => void;
   onCustomSeed: (seed: string) => void;
   onGameMode: (mode: GameMode) => void;
   onAllowDraw: (allow: boolean) => void;
   onAllowUndo: (allow: boolean) => void;
+  onDifficulty: (difficulty: AiDifficulty) => void;
   onCancel: () => void;
   onConfirm: () => void;
   returnFocusRef: RefObject<HTMLElement | null>;
@@ -512,6 +524,35 @@ function GameSetupDialog({
               ))}
             </div>
           </section>
+
+          {matchType === "human-ai" ? (
+            <section
+              className="setup-section difficulty-setup-section"
+              aria-labelledby="difficulty-setting-title"
+            >
+              <div className="setup-section-heading">
+                <h3 id="difficulty-setting-title">对手难度</h3>
+              </div>
+              <div className="rule-mode-options">
+                {AI_DIFFICULTIES.map((tier) => (
+                  <label
+                    className={`rule-mode-option ${difficulty === tier ? "is-selected" : ""}`}
+                    key={tier}
+                  >
+                    <input
+                      type="radio"
+                      name="ai-difficulty"
+                      value={tier}
+                      checked={difficulty === tier}
+                      onChange={() => onDifficulty(tier)}
+                    />
+                    <strong>{DIFFICULTY_LABELS[tier]}</strong>
+                    <span>{DIFFICULTY_HINTS[tier]}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section
             className="setup-section play-options-setting"
@@ -760,6 +801,9 @@ function ModePage({
   const [gameMode, setGameMode] = useState<GameMode>("standard");
   const [allowDraw, setAllowDraw] = useState(true);
   const [allowUndo, setAllowUndo] = useState(true);
+  const [difficulty, setDifficulty] = useState<AiDifficulty>(
+    DEFAULT_AI_DIFFICULTY,
+  );
   const selectedModelInfo = aiStatus?.models.find(
     (model) => model.name === selectedModel,
   );
@@ -780,7 +824,9 @@ function ModePage({
       allowDraw,
       allowUndo,
       ...(selectedSeed ? { seed: selectedSeed } : {}),
-      ...(pendingMatch === "human-ai" ? { model: selectedModel } : {}),
+      ...(pendingMatch === "human-ai"
+        ? { model: selectedModel, difficulty }
+        : {}),
     });
   };
 
@@ -999,11 +1045,13 @@ function ModePage({
           gameMode={gameMode}
           allowDraw={allowDraw}
           allowUndo={allowUndo}
+          difficulty={difficulty}
           onSeedMode={onSeedMode}
           onCustomSeed={onCustomSeed}
           onGameMode={setGameMode}
           onAllowDraw={setAllowDraw}
           onAllowUndo={setAllowUndo}
+          onDifficulty={setDifficulty}
           onCancel={closeSetup}
           onConfirm={confirmSetup}
           returnFocusRef={setupTriggerRef}
@@ -1352,6 +1400,7 @@ function TutorialPage({
     canUndo: revealed,
     matchType: "human-human",
     aiModel: null,
+    aiDifficulty: null,
     revision: revealed ? 1 : 0,
     turn: revealed ? "black" : "red",
     moveNumber: revealed ? 1 : 0,
@@ -2803,8 +2852,13 @@ export function App({ api = gameApi }: { api?: GameApi }) {
       allowDraw: options.allowDraw,
       allowUndo: options.allowUndo,
       matchType: options.matchType,
+      // Only human-ai games carry opponent config; sending it unconditionally
+      // would put a meaningless field on every two-player request.
       ...(options.matchType === "human-ai" && options.model
-        ? { aiModel: options.model }
+        ? {
+            aiModel: options.model,
+            aiDifficulty: options.difficulty ?? DEFAULT_AI_DIFFICULTY,
+          }
         : {}),
       ...(options.seed ? { seed: options.seed } : {}),
     };
@@ -3613,7 +3667,10 @@ export function App({ api = gameApi }: { api?: GameApi }) {
       allowDraw: game.allowDraw,
       allowUndo: game.allowUndo,
       seed: game.seed,
+      // Replay the same opponent, difficulty included: a rematch that quietly
+      // dropped back to the default tier would not be the same game.
       ...(game.aiModel ? { model: game.aiModel } : {}),
+      ...(game.aiDifficulty ? { difficulty: game.aiDifficulty } : {}),
     });
   };
 

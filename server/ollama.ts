@@ -1,10 +1,15 @@
 import { z } from "zod";
-import type {
-  AiModelsResponse,
-  LegalMove,
-  LocalAiModel,
-  PublicGameState,
+import {
+  DEFAULT_AI_DIFFICULTY,
+  type AiDifficulty,
+  type AiModelsResponse,
+  type LegalMove,
+  type LocalAiModel,
+  type PieceIdentity,
+  type PublicBoardPiece,
+  type PublicGameState,
 } from "../shared/contracts";
+import { strategyFor } from "./ai/strategy";
 
 export interface AiDecision {
   moveIndex: number;
@@ -132,6 +137,83 @@ export const decisionJsonSchema = {
   additionalProperties: false,
 } as const;
 
+/**
+ * What a difficulty tier changes. Strength comes mostly from `annotate` —
+ * candidate annotations improve the model's *input* and therefore cost input
+ * tokens only — rather than from a bigger generation budget, because
+ * generation is what actually costs wall-clock time. Every tier's
+ * `decisionTimeoutMs + correctionTimeoutMs` stays at or under 60 s so one
+ * move never outruns a human's patience, retry included.
+ */
+export interface DifficultyProfile {
+  numPredict: number;
+  decisionTimeoutMs: number;
+  correctionTimeoutMs: number;
+  /** Skip the reasoning pass whatever the model supports. */
+  suppressThinking: boolean;
+  /** Annotate candidates with public-only material information. */
+  annotate: boolean;
+}
+
+export const DIFFICULTY_PROFILES: Record<AiDifficulty, DifficultyProfile> = {
+  easy: {
+    numPredict: 64,
+    decisionTimeoutMs: 20_000,
+    correctionTimeoutMs: 10_000,
+    suppressThinking: true,
+    annotate: false,
+  },
+  medium: {
+    numPredict: 128,
+    // Unchanged from the pre-difficulty default so slow local models that
+    // only just fit keep fitting; only the retry was shortened, to stay
+    // inside the 60 s budget.
+    decisionTimeoutMs: 45_000,
+    correctionTimeoutMs: 15_000,
+    suppressThinking: false,
+    annotate: false,
+  },
+  hard: {
+    numPredict: 256,
+    decisionTimeoutMs: 45_000,
+    correctionTimeoutMs: 15_000,
+    suppressThinking: false,
+    annotate: true,
+  },
+};
+
+export const profileFor = (
+  difficulty: AiDifficulty | null | undefined,
+): DifficultyProfile =>
+  DIFFICULTY_PROFILES[difficulty ?? DEFAULT_AI_DIFFICULTY];
+
+/**
+ * Public material values, keyed by the piece designation a caller is allowed
+ * to see. Never call this with a covered piece's server-only true type.
+ */
+const PIECE_VALUES: Record<PieceIdentity["type"], number> = {
+  // Capturing a general ends the game in both modes, so it has to outrank
+  // every other capture. Zero would tell the model the winning move is the
+  // least valuable one on the list.
+  general: 1000,
+  advisor: 2,
+  elephant: 2,
+  horse: 4,
+  cannon: 4.5,
+  rook: 9,
+  pawn: 1,
+};
+
+const PIECE_NAMES: Record<PieceIdentity["type"], string> = {
+  general: "帅将",
+  advisor: "士",
+  elephant: "相象",
+  horse: "马",
+  cannon: "炮",
+  rook: "车",
+  pawn: "兵卒",
+};
+
 const formatPosition = (x: number, y: number) => `(${x},${y})`;
 
 export const buildPrompt = ({ game, legalMoves }: ChooseMoveInput): string => {
@@ -144,23 +226,64 @@ export const buildPrompt = ({ game, legalMoves }: ChooseMoveInput): string => {
     identity: piece.faceUp ? piece.identity : undefined,
     movesAs: piece.faceUp ? undefined : piece.publicIdentity,
   }));
-  const choices = legalMoves.map((move, moveIndex) => ({
-    moveIndex,
-    from: formatPosition(move.from.x, move.from.y),
-    to: formatPosition(move.to.x, move.to.y),
-    captures: move.captures,
-  }));
+  const annotate = profileFor(game.aiDifficulty).annotate;
+  // Every annotation below is derived from the same public projection the
+  // browser gets: a covered piece contributes its publicIdentity, never the
+  // server-only true type. `at` is unique per square, so it keys the lookup.
+  const pieceAt = new Map(
+    game.board.map((piece) => [
+      formatPosition(piece.position.x, piece.position.y),
+      piece,
+    ]),
+  );
+  // `identity` is optional on the wire, so fall back to the public one. That
+  // direction is the safe one: it can under-describe a revealed piece, never
+  // over-describe a covered one.
+  const publicType = (piece: PublicBoardPiece) =>
+    ((piece.faceUp ? piece.identity : undefined) ?? piece.publicIdentity).type;
+  const choices = legalMoves.map((move, moveIndex) => {
+    const from = formatPosition(move.from.x, move.from.y);
+    const to = formatPosition(move.to.x, move.to.y);
+    const base = { moveIndex, from, to, captures: move.captures };
+    if (!annotate) return base;
+    const target = move.captures ? pieceAt.get(to) : undefined;
+    const mover = pieceAt.get(from);
+    return {
+      ...base,
+      ...(target
+        ? {
+            capturesPiece: PIECE_NAMES[publicType(target)],
+            capturesValue: PIECE_VALUES[publicType(target)],
+          }
+        : {}),
+      reveals: Boolean(mover && !mover.faceUp),
+    };
+  });
   const modeGuidance =
     game.mode === "standard"
       ? "标准模式：服务端已排除未应将、自陷己方将帅被攻击和将帅照面的着法；列表中每一项均合法。允许并鼓励在有利时将军对方。"
       : "吃主帅模式：列表中每一项均合法，以实际吃掉对方帅或将为目标。";
 
+  // The reasoning budget scales with the tier. `hard` gets a wider comparison
+  // because the annotations give it something concrete to weigh; `easy` is
+  // told to stop thinking almost immediately.
+  const effortGuidance =
+    game.aiDifficulty === "hard"
+      ? "不要重新验证着法是否合法，不要复述规则或全部候选。挑出最多 4 个较好候选，算清它们的直接子力得失后决定。如果启用了 thinking，请把分析控制在 160 个汉字以内。"
+      : game.aiDifficulty === "easy"
+        ? "不要分析，不要复述规则或候选。扫一眼列表就选一个，立即决定。"
+        : "不要重新验证着法是否合法，不要复述规则、棋盘或全部候选。只比较最多 3 个较好候选，然后立即决定。如果启用了 thinking，请把分析控制在 80 个汉字以内。";
+
   return [
-    "你正在下中国象棋盲棋。请快速从给出的合法着法中选择一个编号。",
+    "你正在下中国象棋盲棋。请从给出的合法着法中选择一个编号。",
     "盖住的棋子只能看到位置身份（movesAs），真实身份未知；不要猜测或声称知道暗子身份。",
     modeGuidance,
-    "不要重新验证着法是否合法，不要复述规则、棋盘或全部候选。只比较最多 3 个较好候选，然后立即决定。",
-    "如果启用了 thinking，请把分析控制在 80 个汉字以内。",
+    effortGuidance,
+    ...(annotate
+      ? [
+          "候选标注只来自公开局面：capturesPiece / capturesValue 是被吃子的公开称谓与子力价值，reveals 表示这一步会翻开你自己的暗子。",
+        ]
+      : []),
     "红方先行，目标是在当前模式下提高胜率。",
     `当前行棋方：${game.turn}；是否被将军：${game.check === game.turn ? "是" : "否"}。`,
     `公开棋盘：${JSON.stringify(publicPieces)}`,
@@ -193,11 +316,28 @@ export const isGptOssModel = (
 export const thinkingOptionForModel = (
   capabilities: ModelCapabilities,
   direct = false,
+  /** Turn the reasoning pass off outright, whatever the family supports. */
+  suppress = false,
 ): true | false | "low" | "medium" | undefined => {
   if (!capabilities.supportsThinking) return undefined;
+  // gpt-oss has no boolean form, so "direct" only lowers its effort. A tier
+  // that promises no thinking at all has to say so explicitly.
+  if (suppress) return capabilities.isGptOss ? "low" : false;
   if (capabilities.isGptOss) return direct ? "low" : "medium";
   return direct ? false : true;
 };
+
+/** The exact thinking option used for one initial or correction request. */
+export const thinkingOptionForRequest = (
+  input: Pick<ChooseMoveInput, "game" | "model">,
+  capabilities: ModelCapabilities,
+  recovering = false,
+): true | false | "low" | "medium" | undefined =>
+  thinkingOptionForModel(
+    capabilities,
+    recovering || prefersDirectDecision(input.model),
+    profileFor(input.game.aiDifficulty).suppressThinking,
+  );
 
 export interface OllamaStreamResult {
   thinking: string;
@@ -316,17 +456,35 @@ export const buildChatRequest = (
   capabilities: ModelCapabilities,
   correction?: string,
 ): OllamaChatRequest => {
-  const direct = Boolean(correction) || prefersDirectDecision(input.model);
-  const think = thinkingOptionForModel(capabilities, direct);
+  // `direct` is the terse schema-recovery mode. A correction retry is about
+  // producing valid JSON, so it drops the strategy text and the budget. The
+  // qwen3-vl quirk is different in kind — it only changes where the model puts
+  // its answer — so those models keep their tier's strategy and budget and
+  // merely skip the reasoning pass.
+  const recovering = Boolean(correction);
+  const profile = profileFor(input.game.aiDifficulty);
+  const strategy = strategyFor(input.game.aiDifficulty);
+  const think = thinkingOptionForRequest(input, capabilities, recovering);
   return {
     model: input.model,
     messages: [
       {
+        // Only a recovery attempt gets the terse persona. Pinning it to
+        // `direct` would hand qwen3-vl a "do not analyse" instruction that
+        // directly contradicts the strategy text it is also being given.
         role: "system",
-        content: direct
+        content: recovering
           ? "你是快速的中国象棋盲棋选着器。不要分析或复述，立即返回一个用户提供的合法 moveIndex 和一句简短理由。"
           : "你是快速、谨慎的中国象棋盲棋对手。只选择用户提供的合法着法，不得请求或推断未公开身份。",
       },
+      // The strategy file is a second system message rather than part of the
+      // user turn: it is identical on every move of a game, so keeping it in
+      // the stable prefix helps Ollama reuse its cache. A correction retry
+      // skips it — that attempt is about producing schema-valid output, not
+      // about playing better.
+      ...(recovering || !strategy
+        ? []
+        : [{ role: "system" as const, content: strategy }]),
       { role: "user", content: buildPrompt(input) },
       ...(correction
         ? [
@@ -342,7 +500,7 @@ export const buildChatRequest = (
     keep_alive: "15m",
     options: {
       temperature: 0,
-      num_predict: direct ? 64 : 128,
+      num_predict: recovering ? 64 : profile.numPredict,
       repeat_penalty: 1.15,
     },
     ...(think === undefined ? {} : { think }),
@@ -556,7 +714,10 @@ export class OllamaClient implements AiProvider {
     }
 
     let response: Response;
-    const decisionTimeoutMs = options.correction ? 20_000 : 45_000;
+    const profile = profileFor(input.game.aiDifficulty);
+    const decisionTimeoutMs = options.correction
+      ? profile.correctionTimeoutMs
+      : profile.decisionTimeoutMs;
     const timeout = AbortSignal.timeout(decisionTimeoutMs);
     const requestSignal = options.signal
       ? AbortSignal.any([options.signal, timeout])

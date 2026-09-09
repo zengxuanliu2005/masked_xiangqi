@@ -57,6 +57,8 @@ Base URL：`http://127.0.0.1:3001/api/v1`
 
 人机局还必须提供 `"aiModel":"qwen3:8b"`。`player1Side` 和 `seed` 可省略。创建人机局时再次确认模型存在且不是 embedding-only。
 
+`aiDifficulty` 取 `easy` / `medium` / `hard`，缺省为 `medium`，未知值返回 `400 INVALID_REQUEST`。它只对人机局生效，其它对局类型在 `PublicGameState` 中投影为 `null`。难度决定服务端注入模型的策略文本、输出预算与决策超时；`hard` 还会给候选着法附加**仅由公开局面推导**的标注（被吃子的公开称谓与子力价值、这一步是否会翻开己方暗子）。策略文本只存在于服务端与 Runner 进程内，不会下发浏览器。
+
 - `201`：`PublicGameState`
 - `404 MODEL_NOT_FOUND`
 - `422 MODEL_NOT_GENERATIVE`

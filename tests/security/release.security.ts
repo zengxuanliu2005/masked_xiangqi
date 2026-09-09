@@ -13,10 +13,12 @@ import {
   writeAgentSessionFile,
 } from "../../server/agent/session-file";
 import {
+  buildChatRequest,
   buildPrompt,
   sanitizeModelText,
   type AiProvider,
 } from "../../server/ollama";
+import { AI_DIFFICULTIES } from "../../shared/contracts";
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -103,6 +105,46 @@ describe("发布安全门禁", () => {
     applyMove(game, { ...first, expectedRevision: 0 });
     resign(game, 1);
     expect(toPublicGame(game).seed).toBe(canary);
+  });
+
+  it("每一档难度的完整请求都不泄漏 Seed 或未翻身份", () => {
+    // The strategy files and the hard tier's candidate annotations both feed
+    // the prompt. Assert on the whole chat request, not just buildPrompt, so
+    // a leak introduced through the strategy system message is also caught.
+    const canary = "MX-SECRET-CANARY-DO-NOT-LEAK";
+    for (const difficulty of AI_DIFFICULTIES) {
+      const game = createGame({
+        mode: "standard",
+        player1Side: "black",
+        matchType: "human-ai",
+        aiModel: "generative",
+        aiDifficulty: difficulty,
+        seed: canary,
+      });
+      const publicGame = toPublicGame(game);
+      const request = buildChatRequest(
+        {
+          game: publicGame,
+          legalMoves: legalMoves(game),
+          model: "generative",
+        },
+        {
+          capabilities: ["completion", "thinking"],
+          supportsThinking: true,
+          isGptOss: false,
+        },
+      );
+      const serialized = JSON.stringify(request.messages);
+
+      expect(serialized, difficulty).not.toContain(canary);
+      expect(serialized, difficulty).not.toContain("trueIdentity");
+      expect(serialized, difficulty).not.toContain('"identity"');
+      for (const piece of publicGame.board.filter(
+        (candidate) => !candidate.faceUp,
+      )) {
+        expect(piece, difficulty).not.toHaveProperty("identity");
+      }
+    }
   });
 
   it("严格处理非法 JSON、未知字段、媒体类型、超限、Host、Origin 与未知路由", async () => {

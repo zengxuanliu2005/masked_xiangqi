@@ -18,3 +18,8 @@ Thumbs.db
 *.swp
 *.swo
 *.tsbuildinfo
+
+# Local agent-facing docs and settings (intentionally untracked)
+/CLAUDE.md
+/AGENTS.md
+/.claude/settings.local.json

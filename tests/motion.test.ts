@@ -33,6 +33,7 @@ const game = (
   canUndo: false,
   matchType: "human-human",
   aiModel: null,
+  aiDifficulty: null,
   revision: 0,
   turn: "red",
   moveNumber: 0,

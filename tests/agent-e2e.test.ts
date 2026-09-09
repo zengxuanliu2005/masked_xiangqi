@@ -75,6 +75,7 @@ describe("Agent Runner HTTP 端到端", () => {
       .send({
         matchType: "human-ai",
         aiModel: "fake-ollama",
+        aiDifficulty: "medium",
         player1Side: "black",
       })
       .expect(201);

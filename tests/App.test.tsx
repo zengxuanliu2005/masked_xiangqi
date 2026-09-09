@@ -39,6 +39,7 @@ const initialGame: PublicGameState = {
   canUndo: false,
   matchType: "human-human",
   aiModel: null,
+  aiDifficulty: null,
   revision: 0,
   turn: "red",
   moveNumber: 0,
@@ -648,6 +649,7 @@ describe("游戏界面", () => {
       ...initialGame,
       matchType: "human-ai",
       aiModel: "qwen-local:latest",
+      aiDifficulty: "medium",
       players: { player1: "black", player2: "red" },
     };
     const afterAiMove: PublicGameState = {
@@ -725,8 +727,46 @@ describe("游戏界面", () => {
       allowUndo: true,
       matchType: "human-ai",
       aiModel: "qwen-local:latest",
+      aiDifficulty: "medium",
       seed: "AI-opening-01",
     });
+  });
+
+  it("难度只在人机对战出现，选中的档位会随建局请求发出", async () => {
+    const user = userEvent.setup();
+    const api = createMockApi({
+      provider: "ollama",
+      available: true,
+      models: [{ name: "qwen-local:latest", parameterSize: "7B" }],
+      message: "已发现 1 个本机模型。",
+    });
+    render(<App api={api} />);
+    await openModeMenu(user);
+    await screen.findByLabelText("选择本机模型");
+
+    // Two-player setup has no opponent to configure.
+    await user.click(screen.getByRole("button", { name: /选择双人对战/ }));
+    expect(screen.queryByText("对手难度")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭本局设置" }));
+
+    await user.click(screen.getByRole("button", { name: /选择人机对战/ }));
+    expect(screen.getByText("对手难度")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /中等/ })).toBeChecked();
+
+    await user.click(screen.getByRole("radio", { name: /困难/ }));
+    expect(screen.getByRole("radio", { name: /困难/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: /确认开局/ }));
+
+    await waitFor(() =>
+      expect(api.createGame).toHaveBeenCalledWith({
+        mode: "standard",
+        allowDraw: true,
+        allowUndo: true,
+        matchType: "human-ai",
+        aiModel: "qwen-local:latest",
+        aiDifficulty: "hard",
+      }),
+    );
   });
 
   it("终端失败时展示可复制命令，并允许从暂停状态重启或停止", async () => {
