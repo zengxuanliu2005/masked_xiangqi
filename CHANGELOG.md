@@ -17,6 +17,7 @@
 
 - 困难档候选标注只从 `PublicGameState` 推导，不读取或泄漏未翻棋子的真实身份。
 - Vite 开发中间件拒绝提供 `.local/**`、`.env*` 与 `.git/**`；AI 策略覆盖拒绝软链接、命名管道等非普通文件及超过 8 KiB 的文件。
+- Vite 的独立 HMR WebSocket 始终绑定回环地址，关闭 LAN 后不会遗留可从同网段访问的开发 listener。
 - 同步升级 Vitest 与 V8 coverage 至 4.1.11，并将间接依赖 `qs` 刷新至 6.16.0，修复当前依赖审计中的路径读取与拒绝服务公告。
 
 ### Fixed
