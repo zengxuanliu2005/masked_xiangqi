@@ -8,3 +8,5 @@ playwright-report/
 test-results/
 package-lock.json
 docs/images/
+# User-supplied visual references retain their original formatting.
+res/example/

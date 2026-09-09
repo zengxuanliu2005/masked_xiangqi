@@ -1,0 +1,28 @@
+async (page) => {
+  const origin = "http://127.0.0.1:3001";
+  const root = ".";
+  const groups = {
+    xiaohongshu: ["01-cover", "02-reveal", "03-together", "04-local-ai", "05-lan", "06-start"],
+    readme: ["hero", "reveal", "together", "local-ai", "tutorial"],
+  };
+  const checks = [];
+  for (const [folder, names] of Object.entries(groups)) {
+    for (const name of names) {
+      const width = folder === "readme" ? 1600 : 1080;
+      const height = folder === "readme" ? 900 : 1440;
+      await page.setViewportSize({ width, height });
+      await page.goto(`${origin}/res/source/campaign.html?art=${name}`);
+      await page.evaluate(() => document.fonts.ready);
+      await page.locator(".art.active").screenshot({ path: `${root}/res/${folder}/${name}.png` });
+      const clipped = await page.locator(".art.active").evaluate((el) => {
+        const p = el.getBoundingClientRect();
+        return [...el.querySelectorAll(".visual,.title,.head,.foot")].filter((n) => {
+          const r = n.getBoundingClientRect();
+          return r.left < p.left || r.right > p.right + 1 || r.top < p.top || r.bottom > p.bottom + 1;
+        }).map((n) => n.textContent);
+      });
+      checks.push({ name, width, height, clipped });
+    }
+  }
+  return checks;
+}

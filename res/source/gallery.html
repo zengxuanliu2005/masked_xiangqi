@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>覆子 · 宣传素材预览</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #e9e7de;
+        color: #293e34;
+        font-family: "PingFang SC", sans-serif;
+      }
+      main {
+        max-width: 1440px;
+        padding: 40px;
+        margin: auto;
+      }
+      h1 {
+        font-family: "Songti SC", serif;
+        font-size: 42px;
+        margin: 0 0 12px;
+      }
+      p {
+        line-height: 1.7;
+      }
+      a {
+        color: #486353;
+      }
+      section {
+        margin: 36px 0;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 24px;
+      }
+      figure {
+        margin: 0;
+      }
+      img {
+        display: block;
+        width: 100%;
+        border-radius: 6px;
+        box-shadow: 0 5px 20px #263c3418;
+      }
+      figcaption {
+        font-size: 16px;
+        margin: 12px 0 5px;
+      }
+      .wide {
+        display: grid;
+        gap: 28px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      @media (max-width: 700px) {
+        main {
+          padding: 20px;
+        }
+        .grid,
+        .wide {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>覆子 · 图文素材</h1>
+      <p>
+        真实界面截图 × 棋子插画背景 × 轻量特色说明<br /><a
+          href="../../docs/promotion/xiaohongshu.md"
+          >小红书贴文</a
+        >
+        · <a href="../../README.md">README</a> ·
+        <a href="campaign.html">可编辑排版</a>
+      </p>
+      <section>
+        <h2>小红书 · 按 01–06 上传</h2>
+        <div class="grid">
+          <figure>
+            <a href="../xiaohongshu/01-cover.png"
+              ><img src="../xiaohongshu/01-cover.png" alt="封面"
+            /></a>
+            <figcaption>01 / 从好奇开始</figcaption>
+          </figure>
+          <figure>
+            <a href="../xiaohongshu/02-reveal.png"
+              ><img src="../xiaohongshu/02-reveal.png" alt="揭面前后"
+            /></a>
+            <figcaption>02 / 棋种与阵营的反转</figcaption>
+          </figure>
+          <figure>
+            <a href="../xiaohongshu/03-together.png"
+              ><img src="../xiaohongshu/03-together.png" alt="同屏双人"
+            /></a>
+            <figcaption>03 / 面对面，轮流下</figcaption>
+          </figure>
+          <figure>
+            <a href="../xiaohongshu/04-local-ai.png"
+              ><img src="../xiaohongshu/04-local-ai.png" alt="本地模型"
+            /></a>
+            <figcaption>04 / 本地模型也来一局</figcaption>
+          </figure>
+          <figure>
+            <a href="../xiaohongshu/05-lan.png"
+              ><img src="../xiaohongshu/05-lan.png" alt="局域网"
+            /></a>
+            <figcaption>05 / 同一 Wi-Fi，各用各的屏幕</figcaption>
+          </figure>
+          <figure>
+            <a href="../xiaohongshu/06-start.png"
+              ><img src="../xiaohongshu/06-start.png" alt="开始体验"
+            /></a>
+            <figcaption>06 / 教学与体验入口</figcaption>
+          </figure>
+        </div>
+      </section>
+      <section>
+        <h2>README · 横版图</h2>
+        <div class="wide">
+          <figure>
+            <img src="../readme/hero.png" alt="首图" />
+            <figcaption>产品首图</figcaption>
+          </figure>
+          <figure>
+            <img src="../readme/reveal.png" alt="揭面" />
+            <figcaption>揭面与反转</figcaption>
+          </figure>
+          <figure>
+            <img src="../readme/together.png" alt="双人" />
+            <figcaption>同屏与局域网</figcaption>
+          </figure>
+          <figure>
+            <img src="../readme/local-ai.png" alt="模型" />
+            <figcaption>本地模型</figcaption>
+          </figure>
+          <figure>
+            <img src="../readme/tutorial.png" alt="教学" />
+            <figcaption>三步教学</figcaption>
+          </figure>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
