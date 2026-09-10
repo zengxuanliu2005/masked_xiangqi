@@ -22,16 +22,20 @@ const insideGit = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
   encoding: "utf8",
 });
 if (insideGit.status === 0) {
-  const staged = spawnSync("git", ["diff", "--cached", "--name-only", "-z"], {
+  const tracked = spawnSync("git", ["ls-files", "-z"], {
     encoding: "utf8",
   });
-  const names = staged.stdout.split("\0").filter(Boolean);
+  if (tracked.status !== 0) {
+    fail(tracked.stderr || "Could not inspect tracked files.");
+  }
+  const names = tracked.stdout.split("\0").filter(Boolean);
   const forbidden = names.filter((name) =>
-    /^(?:\.local\/|node_modules\/|dist\/|coverage\/|output\/|\.playwright-cli\/)|^(?:CLAUDE|AGENTS)\.md$|^\.claude\/settings\.local\.json$|(?:^|\/)\.env(?:\.|$)|\.log$/i.test(
+    /^(?:\.local\/|node_modules\/|dist\/|coverage\/|output\/|\.playwright-cli\/|playwright-report\/|test-results\/|docs\/promotion\/|res\/(?:backgrounds|screenshots|source|xiaohongshu|example)\/)|^res\/xiaohongshu-publish\.zip$|^scripts\/check-agent-docs-sync\.mjs$|^(?:CLAUDE|AGENTS)\.md$|^\.claude\/settings\.local\.json$|(?:^|\/)\.env(?:\.|$)|\.log$/i.test(
       name,
     ),
   );
-  if (forbidden.length) fail(`Forbidden staged files: ${forbidden.join(", ")}`);
+  if (forbidden.length)
+    fail(`Forbidden tracked files: ${forbidden.join(", ")}`);
 
   const diff = spawnSync("git", ["diff", "--cached", "--no-ext-diff", "-U0"], {
     encoding: "utf8",

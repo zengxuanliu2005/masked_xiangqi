@@ -1,6 +1,6 @@
 {
   "name": "masked-xiangqi",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "本机与局域网双人象棋盲棋游戏，以及可供 Agent 调用的 REST API",
   "license": "PolyForm-Noncommercial-1.0.0",

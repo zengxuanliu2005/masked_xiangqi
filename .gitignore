@@ -23,3 +23,13 @@ Thumbs.db
 /CLAUDE.md
 /AGENTS.md
 /.claude/settings.local.json
+
+# Local promotional materials and maintenance hook
+/docs/promotion/
+/res/backgrounds/
+/res/screenshots/
+/res/source/
+/res/xiaohongshu/
+/res/xiaohongshu-publish.zip
+/scripts/check-agent-docs-sync.mjs
+/res/example/
